@@ -9,7 +9,7 @@ DOMAIN = "openwebui_conversation"
 
 DO_SEARCH_INTENT = "DoSearch"
 
-MENU_OPTIONS = ["general_config", "model_config", "search_config"]
+MENU_OPTIONS = ["general_config", "model_config", "tools_config", "search_config"]
 
 CONF_SERVICE_NAME = "service_name"
 CONF_BASE_URL = "base_url"
@@ -22,6 +22,10 @@ CONF_SEARCH_SENTENCES = "search_sentences"
 CONF_SEARCH_RESULT_PREFIX = "search_result_prefix"
 CONF_STRIP_MARKDOWN = "strip_markdown"
 CONF_VERIFY_SSL = "verify_ssl"
+CONF_MAX_HISTORY = "max_history"
+CONF_STREAMING_ENABLED = "streaming_enabled"
+CONF_SERVER_SIDE_TOOLS_ENABLED = "server_side_tools_enabled"
+CONF_TOOL_IDS = "tool_ids"
 
 DEFAULT_SERVICE_NAME = "OpenWebUI"
 DEFAULT_BASE_URL = "http://openwebui.homeassistant.local"
@@ -34,3 +38,7 @@ search [the web | the internet] for {query}"""
 DEFAULT_SEARCH_RESULT_PREFIX = "Based on a search of the internet: "
 DEFAULT_STRIP_MARKDOWN = False
 DEFAULT_VERIFY_SSL = True
+DEFAULT_MAX_HISTORY = 10
+DEFAULT_STREAMING_ENABLED = False
+DEFAULT_SERVER_SIDE_TOOLS_ENABLED = False
+DEFAULT_TOOL_IDS = ""

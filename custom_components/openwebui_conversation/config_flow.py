@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 import types
-from types import MappingProxyType
 from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.selector import (
@@ -41,6 +41,10 @@ from .const import (
     CONF_SEARCH_RESULT_PREFIX,
     CONF_STRIP_MARKDOWN,
     CONF_VERIFY_SSL,
+    CONF_MAX_HISTORY,
+    CONF_STREAMING_ENABLED,
+    CONF_SERVER_SIDE_TOOLS_ENABLED,
+    CONF_TOOL_IDS,
     DEFAULT_SERVICE_NAME,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT,
@@ -51,8 +55,13 @@ from .const import (
     DEFAULT_SEARCH_RESULT_PREFIX,
     DEFAULT_STRIP_MARKDOWN,
     DEFAULT_VERIFY_SSL,
+    DEFAULT_MAX_HISTORY,
+    DEFAULT_STREAMING_ENABLED,
+    DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
+    DEFAULT_TOOL_IDS,
 )
-from .exceptions import ApiClientError, ApiCommError, ApiTimeoutError
+from .exceptions import ApiAuthError, ApiClientError, ApiCommError, ApiTimeoutError
+from .request import normalize_tool_ids
 
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
@@ -77,6 +86,11 @@ DEFAULT_OPTIONS = types.MappingProxyType(
         CONF_SEARCH_SENTENCES: DEFAULT_SEARCH_SENTENCES,
         CONF_SEARCH_RESULT_PREFIX: DEFAULT_SEARCH_RESULT_PREFIX,
         CONF_STRIP_MARKDOWN: DEFAULT_STRIP_MARKDOWN,
+        CONF_VERIFY_SSL: DEFAULT_VERIFY_SSL,
+        CONF_MAX_HISTORY: DEFAULT_MAX_HISTORY,
+        CONF_STREAMING_ENABLED: DEFAULT_STREAMING_ENABLED,
+        CONF_SERVER_SIDE_TOOLS_ENABLED: DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
+        CONF_TOOL_IDS: DEFAULT_TOOL_IDS,
     }
 )
 
@@ -88,7 +102,7 @@ class OpenWebUIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle the initial step."""
         if user_input is None:
             return self.async_show_form(
@@ -115,8 +129,12 @@ class OpenWebUIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             response = await self.client.async_get_heartbeat()
             if not response:
                 raise vol.Invalid("Invalid OpenWebUI server")
+            # The public heartbeat cannot validate API credentials.
+            await self.client.async_get_models()
         except vol.Invalid:
             errors["base"] = "invalid_url"
+        except ApiAuthError:
+            errors["base"] = "invalid_auth"
         except ApiTimeoutError:
             errors["base"] = "timeout_connect"
         except ApiCommError:
@@ -159,13 +177,13 @@ class OpenWebUIOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Manage the options."""
         return self.async_show_menu(step_id="init", menu_options=MENU_OPTIONS)
 
     async def async_step_general_config(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Manage General Settings."""
         if user_input is not None:
             self.options.update(user_input)
@@ -178,7 +196,7 @@ class OpenWebUIOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_model_config(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Manage Model Settings."""
         if user_input is not None:
             self.options.update(user_input)
@@ -193,13 +211,20 @@ class OpenWebUIOptionsFlow(config_entries.OptionsFlow):
                 verify_ssl=self.options.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL),
             )
             response = await client.async_get_models()
-            models = response["data"]
+            models = response.get("data")
+            if not isinstance(models, list):
+                raise ApiClientError("Open WebUI returned a malformed models list")
         except ApiClientError as exception:
             LOGGER.exception("Unexpected exception: %s", exception)
             models = []
 
         schema = openwebui_schema_model_config(
-            self.options, [model["id"] for model in models]
+            self.options,
+            [
+                model["id"]
+                for model in models
+                if isinstance(model, dict) and isinstance(model.get("id"), str)
+            ],
         )
         return self.async_show_form(
             step_id="model_config", data_schema=vol.Schema(schema)
@@ -207,7 +232,7 @@ class OpenWebUIOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_search_config(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Manage Search Settings."""
         if user_input is not None:
             self.options.update(user_input)
@@ -218,8 +243,29 @@ class OpenWebUIOptionsFlow(config_entries.OptionsFlow):
             step_id="search_config", data_schema=vol.Schema(schema)
         )
 
+    async def async_step_tools_config(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage Open WebUI server-side tool settings."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            tool_ids = normalize_tool_ids(user_input.get(CONF_TOOL_IDS))
+            if user_input.get(CONF_SERVER_SIDE_TOOLS_ENABLED) and not tool_ids:
+                errors["base"] = "tool_ids_required"
+            else:
+                user_input[CONF_TOOL_IDS] = "\n".join(tool_ids)
+                self.options.update(user_input)
+                return self.async_create_entry(title="", data=self.options)
 
-def openwebui_schema_general_config(options: MappingProxyType[str, Any]) -> dict:
+        schema = openwebui_schema_tools_config(self.options)
+        return self.async_show_form(
+            step_id="tools_config",
+            data_schema=vol.Schema(schema),
+            errors=errors,
+        )
+
+
+def openwebui_schema_general_config(options: Mapping[str, Any]) -> dict:
     """Return a schema for general config."""
     if not options:
         options = DEFAULT_OPTIONS
@@ -241,17 +287,31 @@ def openwebui_schema_general_config(options: MappingProxyType[str, Any]) -> dict
         vol.Required(
             CONF_VERIFY_SSL,
             description={
-                "suggested_value": options.get(
-                    CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL
-                )
+                "suggested_value": options.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)
             },
             default=DEFAULT_VERIFY_SSL,
-        ): BooleanSelector(BooleanSelectorConfig())
+        ): BooleanSelector(BooleanSelectorConfig()),
+        vol.Optional(
+            CONF_MAX_HISTORY,
+            description={
+                "suggested_value": options.get(CONF_MAX_HISTORY, DEFAULT_MAX_HISTORY)
+            },
+            default=DEFAULT_MAX_HISTORY,
+        ): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+        vol.Required(
+            CONF_STREAMING_ENABLED,
+            description={
+                "suggested_value": options.get(
+                    CONF_STREAMING_ENABLED, DEFAULT_STREAMING_ENABLED
+                )
+            },
+            default=DEFAULT_STREAMING_ENABLED,
+        ): BooleanSelector(BooleanSelectorConfig()),
     }
 
 
 def openwebui_schema_model_config(
-    options: MappingProxyType[str, Any], MODELS: []
+    options: Mapping[str, Any], models: list[str]
 ) -> dict:
     """Return a schema for model config."""
     if not options:
@@ -263,7 +323,7 @@ def openwebui_schema_model_config(
             default=DEFAULT_MODEL,
         ): SelectSelector(
             SelectSelectorConfig(
-                options=MODELS,
+                options=models,
                 mode=SelectSelectorMode.DROPDOWN,
                 custom_value=True,
                 translation_key=CONF_MODEL,
@@ -278,11 +338,11 @@ def openwebui_schema_model_config(
                 )
             },
             default=DEFAULT_STRIP_MARKDOWN,
-        ): BooleanSelector(BooleanSelectorConfig())
+        ): BooleanSelector(BooleanSelectorConfig()),
     }
 
 
-def openwebui_schema_search_config(options: MappingProxyType[str, Any]) -> dict:
+def openwebui_schema_search_config(options: Mapping[str, Any]) -> dict:
     """Return a schema for search config."""
     if not options:
         options = DEFAULT_OPTIONS
@@ -314,4 +374,29 @@ def openwebui_schema_search_config(options: MappingProxyType[str, Any]) -> dict:
             },
             default=DEFAULT_SEARCH_RESULT_PREFIX,
         ): TextSelector(TextSelectorConfig(multiline=False)),
+    }
+
+
+def openwebui_schema_tools_config(options: Mapping[str, Any]) -> dict:
+    """Return a schema for explicit Open WebUI server-side tool IDs."""
+    if not options:
+        options = DEFAULT_OPTIONS
+    return {
+        vol.Required(
+            CONF_SERVER_SIDE_TOOLS_ENABLED,
+            description={
+                "suggested_value": options.get(
+                    CONF_SERVER_SIDE_TOOLS_ENABLED,
+                    DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
+                )
+            },
+            default=DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
+        ): BooleanSelector(BooleanSelectorConfig()),
+        vol.Optional(
+            CONF_TOOL_IDS,
+            description={
+                "suggested_value": options.get(CONF_TOOL_IDS, DEFAULT_TOOL_IDS)
+            },
+            default=DEFAULT_TOOL_IDS,
+        ): TextSelector(TextSelectorConfig(multiline=True)),
     }

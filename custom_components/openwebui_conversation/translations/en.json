@@ -15,7 +15,8 @@
             "cannot_connect": "Failed to connect",
             "invalid_url": "Invalid URL",
             "timeout_connect": "Timeout establishing connection",
-            "unknown": "Unexpected error, check logs"
+            "unknown": "Unexpected error, check logs",
+            "invalid_auth": "Invalid API key or insufficient Open WebUI access"
         },
         "abort": {
             "already_configured": "Service is already configured with given name"
@@ -27,6 +28,7 @@
                 "menu_options": {
                     "general_config": "General Settings",
                     "model_config": "Model Configuration",
+                    "tools_config": "Server-side Tools",
                     "search_config": "Search Configuration"
                 }
             },
@@ -35,7 +37,9 @@
                 "data": {
                     "timeout": "API Timeout",
                     "lang_code": "Language Code",
-                    "verify_ssl": "Verify SSL"
+                    "verify_ssl": "Verify SSL",
+                    "max_history": "Conversation History Turns",
+                    "streaming_enabled": "Buffer Streaming Responses"
                 }
             },
             "model_config": {
@@ -52,7 +56,17 @@
                     "search_sentences": "Search Trigger Sentences",
                     "search_result_prefix": "Search Results Message Prefix"
                 }
+            },
+            "tools_config": {
+                "title": "Open WebUI Server-side Tools",
+                "data": {
+                    "server_side_tools_enabled": "Enable Server-side Tools",
+                    "tool_ids": "Tool IDs (one per line)"
+                }
             }
+        },
+        "error": {
+            "tool_ids_required": "Enter at least one tool ID when server-side tools are enabled"
         }
     }
 }
