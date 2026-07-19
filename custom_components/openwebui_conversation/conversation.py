@@ -2,64 +2,71 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from hassil import recognize
 from hassil.intents import Intents
 
 from homeassistant.components import conversation
-from homeassistant.components.conversation import async_get_chat_log
+from homeassistant.components.conversation.chat_log import AssistantContent, ChatLog
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import (
-    HomeAssistantError,
-)
 from homeassistant.helpers import intent
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.util import ulid
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from markdown_it import MarkdownIt
 from mdit_plain.renderer import RendererPlain
 
 from .api import OpenWebUIApiClient
 from .const import (
-    LOGGER,
-    DO_SEARCH_INTENT,
-    CONF_BASE_URL,
     CONF_API_KEY,
-    CONF_TIMEOUT,
-    CONF_MODEL,
+    CONF_BASE_URL,
     CONF_LANGUAGE_CODE,
+    CONF_MAX_HISTORY,
+    CONF_MODEL,
     CONF_SEARCH_ENABLED,
-    CONF_SEARCH_SENTENCES,
     CONF_SEARCH_RESULT_PREFIX,
+    CONF_SEARCH_SENTENCES,
+    CONF_SERVER_SIDE_TOOLS_ENABLED,
+    CONF_STREAMING_ENABLED,
     CONF_STRIP_MARKDOWN,
+    CONF_TIMEOUT,
+    CONF_TOOL_IDS,
     CONF_VERIFY_SSL,
-    DEFAULT_TIMEOUT,
-    DEFAULT_MODEL,
     DEFAULT_LANGUAGE_CODE,
+    DEFAULT_MAX_HISTORY,
+    DEFAULT_MODEL,
     DEFAULT_SEARCH_ENABLED,
-    DEFAULT_SEARCH_SENTENCES,
     DEFAULT_SEARCH_RESULT_PREFIX,
+    DEFAULT_SEARCH_SENTENCES,
+    DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
+    DEFAULT_STREAMING_ENABLED,
     DEFAULT_STRIP_MARKDOWN,
+    DEFAULT_TIMEOUT,
+    DEFAULT_TOOL_IDS,
     DEFAULT_VERIFY_SSL,
+    DO_SEARCH_INTENT,
+    LOGGER,
 )
-from .exceptions import ApiCommError, ApiJsonError, ApiTimeoutError
-from .message import Message
+from .exceptions import ApiClientError
+from .request import build_chat_completion_payload, normalize_tool_ids
+from .response import extract_assistant_text
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
-) -> bool:
-    """Set up OpenWebUI Conversation Agent from a config entry."""
-    agent = OpenWebUIAgent(hass, entry)
-    async_add_entities([agent])
-    return True
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Set up the OpenWebUI conversation agent from a config entry."""
+    async_add_entities([OpenWebUIAgent(hass, entry)])
 
 
-class OpenWebUIAgent(conversation.ConversationEntity):
+class OpenWebUIAgent(
+    conversation.ConversationEntity, conversation.AbstractConversationAgent
+):
     """OpenWebUI conversation agent."""
 
     _attr_has_entity_name = True
@@ -68,7 +75,6 @@ class OpenWebUIAgent(conversation.ConversationEntity):
         """Initialize the agent."""
         self.hass = hass
         self.entry = entry
-        self.timeout = entry.options.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
         self.client = OpenWebUIApiClient(
             base_url=entry.data[CONF_BASE_URL],
             api_key=entry.data[CONF_API_KEY],
@@ -76,16 +82,15 @@ class OpenWebUIAgent(conversation.ConversationEntity):
             session=async_get_clientsession(hass),
             verify_ssl=entry.options.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL),
         )
-        self.history: dict[str, list[Message]] = {}
         self.search_enabled = entry.options.get(
             CONF_SEARCH_ENABLED, DEFAULT_SEARCH_ENABLED
         )
         self.search_sentences = [
-            x
-            for x in entry.options.get(
+            sentence.strip()
+            for sentence in entry.options.get(
                 CONF_SEARCH_SENTENCES, DEFAULT_SEARCH_SENTENCES
             ).splitlines()
-            if x.strip()
+            if sentence.strip()
         ]
         self.search_result_prefix = entry.options.get(
             CONF_SEARCH_RESULT_PREFIX, DEFAULT_SEARCH_RESULT_PREFIX
@@ -104,165 +109,149 @@ class OpenWebUIAgent(conversation.ConversationEntity):
         return MATCH_ALL
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to Home Assistant."""
+        """Register the agent and its update listener."""
         await super().async_added_to_hass()
+        conversation.async_set_agent(self.hass, self.entry, self)
         self.entry.async_on_unload(
             self.entry.add_update_listener(self._async_entry_update_listener)
         )
 
     async def async_will_remove_from_hass(self) -> None:
-        """When entity will be removed from Home Assistant."""
+        """Unregister the conversation agent."""
+        conversation.async_unset_agent(self.hass, self.entry)
         await super().async_will_remove_from_hass()
 
-    async def async_process(
-        self, user_input: conversation.ConversationInput
+    def _match_search_trigger(self, prompt: str) -> tuple[str, bool]:
+        """Return a rewritten search query when a configured sentence matches."""
+        if not self.search_enabled or not self.search_sentences:
+            return prompt, False
+
+        intents = Intents.from_dict(
+            {
+                "language": self.lang,
+                "settings": {"ignore_whitespace": True},
+                "intents": {
+                    DO_SEARCH_INTENT: {"data": [{"sentences": self.search_sentences}]}
+                },
+                "lists": {"query": {"wildcard": True}},
+            }
+        )
+        result = recognize(prompt, intents)
+        if (
+            result is not None
+            and result.intent.name == DO_SEARCH_INTENT
+            and (query := result.entities.get("query")) is not None
+        ):
+            return query.value, True
+        return prompt, False
+
+    async def _async_handle_message(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: ChatLog,
     ) -> conversation.ConversationResult:
-        """Process a sentence."""
+        """Pass a Home Assistant conversation turn to Open WebUI."""
+        prompt, should_search = self._match_search_trigger(user_input.text)
+        intent_response = intent.IntentResponse(language=user_input.language)
 
-        user_message = Message("user", user_input.text)
-        prompt = user_message.message
-
-        should_search = False
-
-        if self.search_enabled and len(self.search_sentences):
-            i = Intents.from_dict(
-                {
-                    "language": self.lang,
-                    "settings": {"ignore_whitespace": True},
-                    "intents": {
-                        DO_SEARCH_INTENT: {
-                            "data": [{"sentences": self.search_sentences}]
-                        }
-                    },
-                    "lists": {"query": {"wildcard": True}},
-                }
+        try:
+            response = await self.query(prompt, chat_log, should_search)
+            response_data = extract_assistant_text(response)
+        except ApiClientError as err:
+            LOGGER.error("Open WebUI request failed: %s", err)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                "Sorry, I couldn't get a response from Open WebUI.",
             )
-            r = recognize(prompt, i)
-            if r is not None:
-                if (
-                    r.intent.name == DO_SEARCH_INTENT
-                    and r.entities.get("query", None) is not None
-                ):
-                    prompt = r.entities["query"].value
-                    should_search = True
-
-        conversation_result = None
-        conversation_id = user_input.conversation_id or ulid.ulid()
-        conversation_history: list[Message] = []
-
-        with async_get_chat_log(self.hass, user_input) as chat_log:
-            conversation_id = chat_log.conversation_id or user_input.conversation_id or ulid.ulid()
-
-            # Build previous conversation history as list[Message] from HA's managed chat_log.
-            # This ensures proper retention for ConversationEntity threads (e.g. Assistant UI).
-            for content in chat_log.content:
-                if hasattr(content, "role") and hasattr(content, "content") and content.role in ("user", "assistant"):
-                    conversation_history.append(Message(content.role, content.content))
-
-            # chat_log.content usually ends with the current user message (added by the pipeline).
-            # We will append the (possibly search-rewritten) current user prompt inside query(),
-            # so drop the last user entry to avoid sending duplicate current user turn.
-            if conversation_history and conversation_history[-1].role == "user":
-                conversation_history.pop()
-
-            # If chat_log doesn't provide prior turns (common in some setups), fall back to
-            # the legacy self.history which accumulates turns under the conversation_id.
-            if len(conversation_history) == 0 and conversation_id in self.history:
-                conversation_history = list(self.history[conversation_id])
-                LOGGER.debug("Falling back to legacy self.history for conv %s (%d turns)", conversation_id, len(conversation_history))
-
-            LOGGER.debug(
-                "History for %s: %d previous from chat_log (raw %d), legacy %d",
-                conversation_id,
-                len(conversation_history),
-                len(chat_log.content),
-                len(self.history.get(conversation_id, [])),
+            return conversation.ConversationResult(
+                response=intent_response,
+                conversation_id=chat_log.conversation_id,
             )
 
-            try:
-                response = await self.query(
-                    prompt, conversation_history, should_search
-                )
-            except (ApiCommError, ApiJsonError, ApiTimeoutError) as err:
-                LOGGER.error("Error generating prompt: %s (cause: %s)", err, err.__cause__)
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Something went wrong, {err}",
-                )
-                conversation_result = conversation.ConversationResult(
-                    response=intent_response, conversation_id=conversation_id
-                )
-            except HomeAssistantError as err:
-                LOGGER.error("Something went wrong: %s", err)
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    "Something went wrong, please check the logs for more information.",
-                )
-                conversation_result = conversation.ConversationResult(
-                    response=intent_response, conversation_id=conversation_id
-                )
-            else:
-                response_data = response["choices"][0]["message"]["content"]
-                if self.strip_markdown:
-                    response_data = self.markdown_parser.render(response_data)
-                if should_search:
-                    response_data = f"{self.search_result_prefix} {response_data}"
-                response_message = Message("assistant", response_data)
+        if self.strip_markdown:
+            response_data = self.markdown_parser.render(response_data).strip()
+        if should_search:
+            response_data = f"{self.search_result_prefix} {response_data}".strip()
 
-                conversation_history.append(user_message)
-                conversation_history.append(response_message)
-                self.history[conversation_id] = conversation_history
+        chat_log.async_add_assistant_content_without_tools(
+            AssistantContent(
+                agent_id=self.entity_id or user_input.agent_id,
+                content=response_data,
+            )
+        )
+        intent_response.async_set_speech(response_data)
+        return conversation.ConversationResult(
+            response=intent_response,
+            conversation_id=chat_log.conversation_id,
+            continue_conversation=chat_log.continue_conversation,
+        )
 
-                # Sync the turn back to HA's chat_log so the thread state is correct for future calls
-                # and the Assistant UI.
-                try:
-                    from homeassistant.components.conversation.chat_log import AssistantContent
-                    chat_log.async_add_assistant_content(
-                        AssistantContent(
-                            agent_id=self.entity_id,
-                            content=response_data,
-                        )
-                    )
-                except Exception as err:
-                    LOGGER.error("Failed to add assistant turn to chat_log (history may not persist): %s", err)
-                    # Still continue; self.history is updated for this instance's lifetime.
+    def _messages_from_chat_log(
+        self, chat_log: ChatLog, current_prompt: str
+    ) -> list[dict[str, str]]:
+        """Convert Home Assistant's bounded chat history to Open WebUI messages."""
+        messages: list[dict[str, str]] = []
+        for content in chat_log.content:
+            if content.role not in ("system", "user", "assistant"):
+                continue
+            if not isinstance(content.content, str) or not content.content.strip():
+                continue
+            messages.append({"role": content.role, "content": content.content})
 
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_speech(response_data)
-                conversation_result = conversation.ConversationResult(
-                    response=intent_response, conversation_id=conversation_id
-                )
+        # ChatLog already contains the current user turn. Rewrite it in place
+        # when a search trigger extracted a query, avoiding a duplicate message.
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] = current_prompt
+        else:
+            messages.append({"role": "user", "content": current_prompt})
 
-        return conversation_result
+        max_history = self.entry.options.get(CONF_MAX_HISTORY, DEFAULT_MAX_HISTORY)
+        system_messages = [
+            message for message in messages if message["role"] == "system"
+        ]
+        conversation_messages = [
+            message for message in messages if message["role"] != "system"
+        ]
+        # Retain the current user turn plus at most N prior user/assistant turns.
+        max_messages = (int(max_history) * 2) + 1
+        return [*system_messages, *conversation_messages[-max_messages:]]
 
-    async def query(self, prompt: str, history: list[Message], search: bool) -> any:
-        """Process a sentence."""
+    async def query(
+        self, prompt: str, chat_log: ChatLog, search: bool
+    ) -> dict[str, Any]:
+        """Build and send one Open WebUI chat-completions request."""
         model = self.entry.options.get(CONF_MODEL, DEFAULT_MODEL)
+        tool_ids = normalize_tool_ids(
+            self.entry.options.get(CONF_TOOL_IDS, DEFAULT_TOOL_IDS)
+        )
+        tools_enabled = self.entry.options.get(
+            CONF_SERVER_SIDE_TOOLS_ENABLED, DEFAULT_SERVER_SIDE_TOOLS_ENABLED
+        )
+        stream = self.entry.options.get(
+            CONF_STREAMING_ENABLED, DEFAULT_STREAMING_ENABLED
+        )
+        messages = self._messages_from_chat_log(chat_log, prompt)
+        payload = build_chat_completion_payload(
+            model=model,
+            messages=messages,
+            stream=stream,
+            web_search=search,
+            server_side_tools_enabled=tools_enabled,
+            tool_ids=tool_ids,
+        )
 
-        message_list = [{"role": x.role, "content": x.message} for x in history]
-        message_list.append({"role": "user", "content": prompt})
-
-        LOGGER.debug("Sending %d messages to OpenWebUI (model=%s)", len(message_list), model)
-
-        payload = {
-            "model": model,
-            "messages": message_list,
-            "stream": False,
-            "features": {"web_search": search},
-        }
-
-        LOGGER.debug("Prompt for %s: %s", model, prompt)
-        LOGGER.debug("Request payload: %s", payload)
-
-        result = await self.client.async_generate(payload)
-
-        return result
+        LOGGER.debug(
+            "Sending Open WebUI request (model=%s, messages=%d, tool_ids=%s, web_search=%s, stream=%s)",
+            model,
+            len(messages),
+            tool_ids if tools_enabled else [],
+            search,
+            stream,
+        )
+        return await self.client.async_generate(payload)
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
     ) -> None:
-        """Handle options update."""
-        # Reload as we update device info + entity name + supported features
+        """Reload the entry after options change."""
         await hass.config_entries.async_reload(entry.entry_id)
