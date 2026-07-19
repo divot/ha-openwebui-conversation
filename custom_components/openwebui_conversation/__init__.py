@@ -1,5 +1,4 @@
-"""Custom integration to integrate openwebui_conversation with Home Assistant.
-"""
+"""Integrate OpenWebUI Conversation with Home Assistant."""
 
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ from .const import (
     DEFAULT_VERIFY_SSL,
 )
 from .coordinator import OpenWebUIDataUpdateCoordinator
-from .exceptions import ApiClientError, ApiCommError, ApiJsonError, ApiTimeoutError
+from .exceptions import ApiClientError
 
 PLATFORMS = (Platform.CONVERSATION,)
 
@@ -42,9 +41,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     try:
-        response = await client.async_get_heartbeat()
-        if not response:
-            raise ApiClientError("Invalid OpenWebUI server")
+        # Heartbeat is public; verify the stored credential still has API access.
+        await client.async_get_models()
     except ApiClientError as err:
         raise ConfigEntryNotReady(err) from err
 
