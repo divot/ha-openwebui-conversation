@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest
+pytest-asyncio
+pytest-homeassistant-custom-component
+home-assistant-intents==2026.6.24
