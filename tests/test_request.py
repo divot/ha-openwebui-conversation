@@ -79,3 +79,15 @@ def test_tools_and_web_search_coexist_without_caller_tools() -> None:
 def test_streaming_selection() -> None:
     """Streaming selection maps directly to the Open WebUI request."""
     assert _payload(stream=True)["stream"] is True
+
+
+def test_persistent_chat_metadata() -> None:
+    """Native chat identifiers are included only when a chat is selected."""
+    payload = _payload(
+        chat_id="chat-id",
+        message_id="assistant-message-id",
+    )
+    assert payload["chat_id"] == "chat-id"
+    assert payload["id"] == "assistant-message-id"
+
+    assert "id" not in _payload(message_id="orphan-message-id")

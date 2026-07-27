@@ -104,6 +104,37 @@ async def test_non_object_chat_response_is_rejected() -> None:
         )
 
 
+async def test_create_persistent_chat() -> None:
+    """The native chat endpoint returns the server-generated chat ID."""
+    session = FakeSession(FakeResponse(json_data={"id": "chat-id", "chat": {}}))
+    chat = {"title": "Home Assistant", "history": {"messages": {}}}
+
+    result = await _client(session).async_create_chat(chat)
+
+    assert result == "chat-id"
+    assert session.request_kwargs["url"].endswith("/api/v1/chats/new")
+    assert session.request_kwargs["json"] == {"chat": chat}
+
+
+async def test_malformed_persistent_chat_response_is_rejected() -> None:
+    """A chat create response must contain a non-empty string ID."""
+    with pytest.raises(ApiJsonError, match="malformed new chat response"):
+        await _client(
+            FakeSession(FakeResponse(json_data={"id": None}))
+        ).async_create_chat({})
+
+
+async def test_update_persistent_chat_escapes_id() -> None:
+    """The chat ID cannot alter the update endpoint path."""
+    session = FakeSession(FakeResponse(json_data={"id": "chat-id", "chat": {}}))
+    chat = {"title": "Updated"}
+
+    await _client(session).async_update_chat("chat/id", chat)
+
+    assert session.request_kwargs["url"].endswith("/api/v1/chats/chat%2Fid")
+    assert session.request_kwargs["json"] == {"chat": chat}
+
+
 async def test_auth_error_redacts_credentials() -> None:
     """Upstream bodies cannot leak API keys or bearer tokens through errors."""
     body = '{"authorization":"Bearer top-secret-key","api_key":"top-secret-key"}'

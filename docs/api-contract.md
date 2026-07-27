@@ -84,6 +84,32 @@ When caller-provided `tools` is present—even an empty list—the request takes
 caller-owned tool path and skips `tool_ids` resolution. This integration never
 adds `tools`.
 
+## Optional persistent chat lifecycle
+
+The General Settings option **Show Conversations in Open WebUI** mirrors each
+Home Assistant conversation into a native Open WebUI chat:
+
+1. `POST /api/v1/chats/new` with Open WebUI's tree-shaped `history` creates the
+   record and returns its server-generated ID.
+2. Home Assistant stores only its conversation-ID to Open WebUI chat-ID mapping
+   in local integration storage.
+3. `POST /api/chat/completions` includes `chat_id` and the assistant message
+   `id`.
+4. `POST /api/v1/chats/{id}` stores the completed assistant content and the
+   current mirrored history.
+
+The completion does not include `session_id`. In current Open WebUI source,
+combining `session_id` and `chat_id` selects the WebSocket/background-task path
+and returns task metadata instead of the final assistant response. Omitting it
+keeps the direct HTTP completion contract used by Home Assistant.
+
+Home Assistant's `ChatLog` remains authoritative. The bounded message list is
+sent for model context, while the persistent Open WebUI record mirrors all
+displayable messages in that Home Assistant conversation. Chat create/update
+failures are logged and fall back to the existing stateless completion path so
+sidebar persistence cannot suppress a voice response. API-key endpoint
+restrictions must allow `/api/v1/chats` for this option.
+
 ## Tool activation and discovery
 
 `GET /api/v1/tools/` returns tool metadata filtered for the authenticated user's
@@ -158,13 +184,15 @@ the richer native streaming response handler. Consequently:
 - the exact direct-API stream sequence and fully iterated final response must be
   confirmed against the deployed Open WebUI/model/provider;
 - `/api/chat/completed` runs `outlet()` filters after a direct chat. It is not
-  required to complete the tool loop or this stateless request contract, but an
+  required to complete the tool loop or this direct request contract, but an
   integration that promises outlet-filtered output must make that second call
   on stable Open WebUI releases.
 
-Home Assistant supplies bounded full message history on every turn. No Open
-WebUI persistent chat is created; no `chat_id`, `session_id`, or message IDs are
-sent. Home Assistant conversation IDs remain local and need no mapping.
+Home Assistant supplies bounded full message history on every turn. Persistent
+Open WebUI chats are disabled by default. When enabled, the integration creates
+and updates the native chat, sends `chat_id` and an assistant message `id`, and
+persists the Home Assistant-to-Open WebUI ID mapping locally. It does not send
+`session_id`.
 
 ## Home Assistant MCP contract
 
@@ -248,11 +276,12 @@ streaming terminates, and that both search and MCP can run in one request.
     `/api/chat/completed` is separately required if the caller needs `outlet()`
     filters to run and return their transformed output on stable releases; that
     optional filter contract is outside this first feature.
-12. **History owner?** Home Assistant `ChatLog`, sent as bounded message history.
-13. **Persistent Open WebUI chats?** No concrete benefit for HA voice; do not
-    create them in the first implementation.
-14. **Conversation-ID mapping?** None. Return the HA ID locally and keep Open
-    WebUI requests stateless.
+12. **History owner?** Home Assistant `ChatLog`, sent as bounded model context
+    and optionally mirrored in full to Open WebUI.
+13. **Persistent Open WebUI chats?** Opt-in under General Settings. Create and
+    update native `/api/v1/chats` records while preserving the stateless default.
+14. **Conversation-ID mapping?** Store only the Home Assistant-to-Open WebUI
+    chat-ID mapping locally so an Open WebUI chat is reused after reload.
 15. **HA MCP endpoint?** Prefer `/api/mcp/assist`; use `/api/mcp` only for an
     intentional MCP Server API selection.
 16. **HA MCP authentication/permission?** Authenticated OAuth or bearer token;
@@ -263,12 +292,12 @@ streaming terminates, and that both search and MCP can run in one request.
 18. **Model lacks native tool calling?** It can ignore the tools, fail parsing,
     or return an error/fallback depending on Open WebUI mode. Choose a capable
     model or supported legacy mode; do not claim a side effect succeeded.
-19. **Smallest upstreamable feature?** Explicit, opt-in normalized `tool_ids`
-    in the existing endpoint, with no caller `tools`, safe final-text parsing,
-    tests, translations, and documentation.
+19. **Smallest upstreamable feature?** Keep both tools and persistent chats
+    independently opt-in, preserve the legacy request when disabled, and cover
+    request shapes, final-text safety, options, translations, and documentation.
 20. **Intentional follow-ups?** Tool discovery, reauth/reconfigure, progressive
-    streaming, persistent chats, broad HA API exposure, automatic tool enabling,
-    and live deployment mutation.
+    streaming, broad HA API exposure, automatic tool enabling, and live
+    deployment mutation.
 
 ## Primary references
 

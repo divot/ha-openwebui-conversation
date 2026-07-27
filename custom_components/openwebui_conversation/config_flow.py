@@ -42,6 +42,7 @@ from .const import (
     CONF_STRIP_MARKDOWN,
     CONF_VERIFY_SSL,
     CONF_MAX_HISTORY,
+    CONF_PERSISTENT_CHAT_ENABLED,
     CONF_STREAMING_ENABLED,
     CONF_SERVER_SIDE_TOOLS_ENABLED,
     CONF_TOOL_IDS,
@@ -56,6 +57,7 @@ from .const import (
     DEFAULT_STRIP_MARKDOWN,
     DEFAULT_VERIFY_SSL,
     DEFAULT_MAX_HISTORY,
+    DEFAULT_PERSISTENT_CHAT_ENABLED,
     DEFAULT_STREAMING_ENABLED,
     DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
     DEFAULT_TOOL_IDS,
@@ -88,6 +90,7 @@ DEFAULT_OPTIONS = types.MappingProxyType(
         CONF_STRIP_MARKDOWN: DEFAULT_STRIP_MARKDOWN,
         CONF_VERIFY_SSL: DEFAULT_VERIFY_SSL,
         CONF_MAX_HISTORY: DEFAULT_MAX_HISTORY,
+        CONF_PERSISTENT_CHAT_ENABLED: DEFAULT_PERSISTENT_CHAT_ENABLED,
         CONF_STREAMING_ENABLED: DEFAULT_STREAMING_ENABLED,
         CONF_SERVER_SIDE_TOOLS_ENABLED: DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
         CONF_TOOL_IDS: DEFAULT_TOOL_IDS,
@@ -306,6 +309,15 @@ def openwebui_schema_general_config(options: Mapping[str, Any]) -> dict:
                 )
             },
             default=DEFAULT_STREAMING_ENABLED,
+        ): BooleanSelector(BooleanSelectorConfig()),
+        vol.Required(
+            CONF_PERSISTENT_CHAT_ENABLED,
+            description={
+                "suggested_value": options.get(
+                    CONF_PERSISTENT_CHAT_ENABLED, DEFAULT_PERSISTENT_CHAT_ENABLED
+                )
+            },
+            default=DEFAULT_PERSISTENT_CHAT_ENABLED,
         ): BooleanSelector(BooleanSelectorConfig()),
     }
 

@@ -80,6 +80,19 @@ Settings relating to the integration itself.
 | Verify SSL    | Verify SSL certificates for HTTPS. Disable verification if you are using self signed certificates.                               |
 | Conversation History Turns | Maximum prior user/assistant turns sent from Home Assistant's `ChatLog`. Defaults to 10. |
 | Buffer Streaming Responses | Request SSE from Open WebUI but buffer it until a final answer is available. Disabled by default; see Known limitations. |
+| Show Conversations in Open WebUI | Create and update one persistent Open WebUI chat for each Home Assistant conversation. Disabled by default. |
+
+When **Show Conversations in Open WebUI** is enabled, chats appear with a
+`Home Assistant: …` title in the Open WebUI sidebar. Home Assistant stores only
+the mapping between its conversation ID and Open WebUI's chat ID; Open WebUI
+stores the mirrored message history. If API-key endpoint restrictions are
+enabled in Open WebUI, allow the `/api/v1/chats` endpoints in addition to
+`/api/models` and `/api/chat/completions`.
+
+Persistent completions include Open WebUI's `chat_id` and assistant message
+`id`. They deliberately omit `session_id`: that field selects Open WebUI's
+WebSocket/background-task response path, while this integration needs the final
+answer returned directly over HTTP.
 
 #### Model Configuration
 The language model you want to use.
@@ -152,16 +165,18 @@ The integration does not log request transcripts, full payloads, response/error 
 | Home Assistant MCP connects but cannot control an entity | Expose the entity to Assist and verify that the selected MCP endpoint/API provides the required intent. |
 | Tool claims success but nothing changed | Inspect Open WebUI's tool result and Home Assistant logs. Do not assume a model's natural-language claim proves an action succeeded. |
 | Web search does not run | Configure a search provider globally, allow web search for the API user, enable the model capability, and use one of the configured trigger sentences. |
+| Chats do not appear in Open WebUI | Enable **Show Conversations in Open WebUI** and allow the API key to create and update `/api/v1/chats` records. Chat persistence failures are logged while the conversation falls back to a stateless completion. |
 | TLS failure | Use a certificate trusted by the caller, or explicitly disable verification only on a trusted private network. |
 | Timeout or interrupted stream | Increase API Timeout, check Open WebUI's tool/MCP timeouts, and disable buffered streaming while diagnosing. |
 
 ## Migration from v1.3.x
 
-No config-entry migration is required. Existing entries keep their prior non-tool, non-streaming behavior because every new option has a backward-compatible default. Conversation history now comes exclusively from Home Assistant's `ChatLog`; the integration no longer maintains a second in-memory history. The API key is validated against the authenticated model-list endpoint during new setup.
+No config-entry migration is required. Existing entries keep their prior non-tool, non-streaming, stateless behavior because every new option has a backward-compatible default. Conversation history now comes exclusively from Home Assistant's `ChatLog`; the integration no longer maintains a second in-memory history. The API key is validated against the authenticated model-list endpoint during new setup.
 
 ## Known limitations
 
-* This implementation does not create persistent Open WebUI chats and sends no `chat_id`, `session_id`, or message IDs. Home Assistant conversation IDs remain local to Home Assistant.
+* Persistent Open WebUI chats are optional. When enabled, Open WebUI retains a copy of the Home Assistant conversation until it is deleted there; only the chat-ID mapping is retained in Home Assistant.
+* An Open WebUI chat that was deleted or became inaccessible is replaced on the next turn when the API key still has chat-creation access.
 * Buffered SSE is transport support, not progressive Home Assistant speech. It intentionally withholds intermediate tool calls, status JSON, and reasoning.
 * Tool-enabled streaming behavior varies by Open WebUI version and model function-calling mode. Keep buffered streaming disabled until the included contract probe passes against your deployed version.
 * Tool discovery remains manual in the first release.

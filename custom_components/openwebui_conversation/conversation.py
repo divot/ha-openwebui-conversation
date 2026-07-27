@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, Literal
+from uuid import NAMESPACE_URL, uuid5
 
 from hassil import recognize
 from hassil.intents import Intents
@@ -12,9 +15,11 @@ from homeassistant.components.conversation.chat_log import AssistantContent, Cha
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, intent
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.storage import Store
 
 from markdown_it import MarkdownIt
 from mdit_plain.renderer import RendererPlain
@@ -26,6 +31,7 @@ from .const import (
     CONF_LANGUAGE_CODE,
     CONF_MAX_HISTORY,
     CONF_MODEL,
+    CONF_PERSISTENT_CHAT_ENABLED,
     CONF_SEARCH_ENABLED,
     CONF_SEARCH_RESULT_PREFIX,
     CONF_SEARCH_SENTENCES,
@@ -38,6 +44,7 @@ from .const import (
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_MAX_HISTORY,
     DEFAULT_MODEL,
+    DEFAULT_PERSISTENT_CHAT_ENABLED,
     DEFAULT_SEARCH_ENABLED,
     DEFAULT_SEARCH_RESULT_PREFIX,
     DEFAULT_SEARCH_SENTENCES,
@@ -54,6 +61,8 @@ from .const import (
 from .exceptions import ApiClientError
 from .request import build_chat_completion_payload, normalize_tool_ids
 from .response import extract_assistant_text
+
+_CHAT_ID_STORAGE_VERSION = 1
 
 
 async def async_setup_entry(
@@ -111,6 +120,13 @@ class OpenWebUIAgent(
             CONF_STRIP_MARKDOWN, DEFAULT_STRIP_MARKDOWN
         )
         self.markdown_parser = MarkdownIt(renderer_cls=RendererPlain)
+        self._chat_id_store = Store[dict[str, str]](
+            hass,
+            _CHAT_ID_STORAGE_VERSION,
+            f"{DOMAIN}.{entry.entry_id}.persistent_chat_ids",
+        )
+        self._persistent_chat_ids: dict[str, str] | None = None
+        self._persistent_chat_lock = asyncio.Lock()
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
@@ -199,6 +215,24 @@ class OpenWebUIAgent(
         self, chat_log: ChatLog, current_prompt: str
     ) -> list[dict[str, str]]:
         """Convert Home Assistant's bounded chat history to Open WebUI messages."""
+        messages = self._all_messages_from_chat_log(chat_log, current_prompt)
+
+        max_history = self.entry.options.get(CONF_MAX_HISTORY, DEFAULT_MAX_HISTORY)
+        system_messages = [
+            message for message in messages if message["role"] == "system"
+        ]
+        conversation_messages = [
+            message for message in messages if message["role"] != "system"
+        ]
+        # Retain the current user turn plus at most N prior user/assistant turns.
+        max_messages = (int(max_history) * 2) + 1
+        return [*system_messages, *conversation_messages[-max_messages:]]
+
+    @staticmethod
+    def _all_messages_from_chat_log(
+        chat_log: ChatLog, current_prompt: str
+    ) -> list[dict[str, str]]:
+        """Convert all displayable Home Assistant chat content to messages."""
         messages: list[dict[str, str]] = []
         for content in chat_log.content:
             if content.role not in ("system", "user", "assistant"):
@@ -214,16 +248,167 @@ class OpenWebUIAgent(
         else:
             messages.append({"role": "user", "content": current_prompt})
 
-        max_history = self.entry.options.get(CONF_MAX_HISTORY, DEFAULT_MAX_HISTORY)
-        system_messages = [
-            message for message in messages if message["role"] == "system"
-        ]
-        conversation_messages = [
-            message for message in messages if message["role"] != "system"
-        ]
-        # Retain the current user turn plus at most N prior user/assistant turns.
-        max_messages = (int(max_history) * 2) + 1
-        return [*system_messages, *conversation_messages[-max_messages:]]
+        return messages
+
+    def _stable_message_id(self, conversation_id: str, role: str, index: int) -> str:
+        """Return a stable UUID for an Open WebUI message."""
+        return str(
+            uuid5(
+                NAMESPACE_URL,
+                f"{DOMAIN}:{self.entry.entry_id}:{conversation_id}:{role}:{index}",
+            )
+        )
+
+    @staticmethod
+    def _persistent_chat_title(messages: list[dict[str, str]]) -> str:
+        """Build a concise, recognizable Open WebUI sidebar title."""
+        first_user_message = next(
+            (message["content"] for message in messages if message["role"] == "user"),
+            "",
+        )
+        title = " ".join(first_user_message.split())
+        if len(title) > 80:
+            title = f"{title[:77].rstrip()}..."
+        return f"Home Assistant: {title}" if title else "Home Assistant"
+
+    def _build_persistent_chat(
+        self,
+        *,
+        chat_log: ChatLog,
+        conversation_id: str,
+        current_prompt: str,
+        model: str,
+        response_text: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Build Open WebUI's persistent, tree-shaped chat representation."""
+        messages = self._all_messages_from_chat_log(chat_log, current_prompt)
+        now = int(time.time())
+        history_messages: dict[str, dict[str, Any]] = {}
+        previous_id: str | None = None
+
+        for index, message in enumerate(messages):
+            message_id = self._stable_message_id(
+                conversation_id, message["role"], index
+            )
+            persistent_message: dict[str, Any] = {
+                "id": message_id,
+                "parentId": previous_id,
+                "childrenIds": [],
+                "role": message["role"],
+                "content": message["content"],
+                "timestamp": now - (len(messages) - index),
+            }
+            if message["role"] == "assistant":
+                persistent_message.update({"model": model, "done": True})
+            history_messages[message_id] = persistent_message
+            if previous_id is not None:
+                history_messages[previous_id]["childrenIds"].append(message_id)
+            previous_id = message_id
+
+        response_id = self._stable_message_id(
+            conversation_id, "assistant", len(messages)
+        )
+        response_message = {
+            "id": response_id,
+            "parentId": previous_id,
+            "childrenIds": [],
+            "role": "assistant",
+            "content": response_text or "",
+            "model": model,
+            "modelName": model,
+            "modelIdx": 0,
+            "timestamp": now,
+            "done": response_text is not None,
+        }
+        history_messages[response_id] = response_message
+        if previous_id is not None:
+            history_messages[previous_id]["childrenIds"].append(response_id)
+
+        return (
+            {
+                "title": self._persistent_chat_title(messages),
+                "models": [model],
+                "params": {},
+                "history": {
+                    "messages": history_messages,
+                    "currentId": response_id,
+                },
+                "messages": list(history_messages.values()),
+                "tags": [],
+                "timestamp": int(time.time() * 1000),
+            },
+            response_id,
+        )
+
+    async def _async_load_persistent_chat_ids(self) -> None:
+        """Load the Home Assistant to Open WebUI chat ID mapping once."""
+        if self._persistent_chat_ids is not None:
+            return
+        try:
+            stored = await self._chat_id_store.async_load()
+        except HomeAssistantError as err:
+            LOGGER.warning(
+                "Unable to load the persistent Open WebUI chat mapping: %s", err
+            )
+            stored = None
+        self._persistent_chat_ids = (
+            {
+                conversation_id: chat_id
+                for conversation_id, chat_id in stored.items()
+                if isinstance(conversation_id, str)
+                and isinstance(chat_id, str)
+                and chat_id
+            }
+            if isinstance(stored, dict)
+            else {}
+        )
+
+    async def _async_prepare_persistent_chat(
+        self, conversation_id: str, chat: dict[str, Any]
+    ) -> str | None:
+        """Create or update the native chat before sending a completion."""
+        async with self._persistent_chat_lock:
+            await self._async_load_persistent_chat_ids()
+            assert self._persistent_chat_ids is not None
+
+            if chat_id := self._persistent_chat_ids.get(conversation_id):
+                try:
+                    await self.client.async_update_chat(chat_id, chat)
+                    return chat_id
+                except ApiClientError as err:
+                    LOGGER.warning(
+                        "Unable to update persistent Open WebUI chat; "
+                        "attempting to create a replacement: %s",
+                        err,
+                    )
+
+            try:
+                chat_id = await self.client.async_create_chat(chat)
+            except ApiClientError as err:
+                LOGGER.warning(
+                    "Unable to create a persistent Open WebUI chat; "
+                    "continuing with a stateless completion: %s",
+                    err,
+                )
+                return None
+
+            self._persistent_chat_ids[conversation_id] = chat_id
+            try:
+                await self._chat_id_store.async_save(self._persistent_chat_ids)
+            except HomeAssistantError as err:
+                LOGGER.warning(
+                    "Unable to save the persistent Open WebUI chat mapping: %s", err
+                )
+            return chat_id
+
+    async def _async_finish_persistent_chat(
+        self, chat_id: str, chat: dict[str, Any]
+    ) -> None:
+        """Store the completed assistant message without masking its response."""
+        try:
+            await self.client.async_update_chat(chat_id, chat)
+        except ApiClientError as err:
+            LOGGER.warning("Unable to finalize persistent Open WebUI chat: %s", err)
 
     async def query(
         self, prompt: str, chat_log: ChatLog, search: bool
@@ -240,6 +425,29 @@ class OpenWebUIAgent(
             CONF_STREAMING_ENABLED, DEFAULT_STREAMING_ENABLED
         )
         messages = self._messages_from_chat_log(chat_log, prompt)
+        persistent_chat_enabled = self.entry.options.get(
+            CONF_PERSISTENT_CHAT_ENABLED, DEFAULT_PERSISTENT_CHAT_ENABLED
+        )
+        conversation_id = chat_log.conversation_id
+        chat_id: str | None = None
+        message_id: str | None = None
+
+        if persistent_chat_enabled and conversation_id:
+            draft_chat, message_id = self._build_persistent_chat(
+                chat_log=chat_log,
+                conversation_id=conversation_id,
+                current_prompt=prompt,
+                model=model,
+            )
+            chat_id = await self._async_prepare_persistent_chat(
+                conversation_id, draft_chat
+            )
+        elif persistent_chat_enabled:
+            LOGGER.warning(
+                "Cannot create a persistent Open WebUI chat without a "
+                "Home Assistant conversation ID"
+            )
+
         payload = build_chat_completion_payload(
             model=model,
             messages=messages,
@@ -247,17 +455,33 @@ class OpenWebUIAgent(
             web_search=search,
             server_side_tools_enabled=tools_enabled,
             tool_ids=tool_ids,
+            chat_id=chat_id,
+            message_id=message_id,
         )
 
         LOGGER.debug(
-            "Sending Open WebUI request (model=%s, messages=%d, tool_ids=%s, web_search=%s, stream=%s)",
+            "Sending Open WebUI request (model=%s, messages=%d, tool_ids=%s, "
+            "web_search=%s, stream=%s, persistent_chat=%s)",
             model,
             len(messages),
             tool_ids if tools_enabled else [],
             search,
             stream,
+            bool(chat_id),
         )
-        return await self.client.async_generate(payload)
+        response = await self.client.async_generate(payload)
+
+        if chat_id and conversation_id:
+            completed_chat, _ = self._build_persistent_chat(
+                chat_log=chat_log,
+                conversation_id=conversation_id,
+                current_prompt=prompt,
+                model=model,
+                response_text=extract_assistant_text(response),
+            )
+            await self._async_finish_persistent_chat(chat_id, completed_chat)
+
+        return response
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry

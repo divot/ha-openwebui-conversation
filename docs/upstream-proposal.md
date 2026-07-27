@@ -3,6 +3,11 @@
 No GitHub issue, comment, branch, commit, or pull request was created by this
 work. The following text is ready for maintainer review.
 
+This is the historical proposal for the server-side tools work. Persistent
+Open WebUI chats were subsequently added as a separate, disabled-by-default
+General Settings option; see the README and API contract for the current
+behavior.
+
 ## Draft comment for issue #37
 
 > I investigated adding Open WebUI-owned tools without moving the tool loop into
@@ -51,7 +56,8 @@ tools itself.
 - Preserve the existing `features.web_search` contract and allow search and
   tools in one request.
 - Use Home Assistant's supported `_async_handle_message`/`ChatLog` lifecycle,
-  bound prior history, and avoid persistent Open WebUI chat/session IDs.
+  and bound prior history. Persistent Open WebUI chats remain outside this
+  tools-only proposal.
 - Parse plain and structured final responses without speaking reasoning, tool
   structures, or citation metadata.
 - Add optional buffered SSE/NDJSON support, disabled by default.
@@ -109,8 +115,8 @@ normalization tests, no-`tools` invariant, and final-text safety.
 
 - Tool IDs are entered manually; permission-aware discovery is not yet exposed
   in the options UI.
-- The integration uses stateless direct completions and does not create Open
-  WebUI chat records.
+- Persistent Open WebUI chat records are a separate opt-in feature; the default
+  direct-completion path remains stateless.
 - Streaming is buffered rather than progressively spoken and is disabled by
   default.
 - Tool-loop behavior depends on Open WebUI version, model/provider support, user

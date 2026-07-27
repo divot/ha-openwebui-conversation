@@ -8,7 +8,7 @@ import re
 import socket
 import time
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 
@@ -85,6 +85,36 @@ class OpenWebUIApiClient:
         )
         if not isinstance(response, dict):
             raise ApiJsonError("Open WebUI returned a malformed models response")
+        return response
+
+    async def async_create_chat(self, chat: dict[str, Any]) -> str:
+        """Create a persistent chat and return its Open WebUI ID."""
+        response = await self._api_wrapper(
+            method="post",
+            url=f"{self._base_url}/api/v1/chats/new",
+            data={"chat": chat},
+            headers=self._auth_headers,
+        )
+        if (
+            not isinstance(response, dict)
+            or not isinstance(response.get("id"), str)
+            or not response["id"]
+        ):
+            raise ApiJsonError("Open WebUI returned a malformed new chat response")
+        return response["id"]
+
+    async def async_update_chat(
+        self, chat_id: str, chat: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Replace the client-owned state of a persistent Open WebUI chat."""
+        response = await self._api_wrapper(
+            method="post",
+            url=f"{self._base_url}/api/v1/chats/{quote(chat_id, safe='')}",
+            data={"chat": chat},
+            headers=self._auth_headers,
+        )
+        if not isinstance(response, dict):
+            raise ApiJsonError("Open WebUI returned a malformed updated chat response")
         return response
 
     async def async_generate(

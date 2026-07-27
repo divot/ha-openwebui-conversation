@@ -39,7 +39,11 @@
                     "lang_code": "Language Code",
                     "verify_ssl": "Verify SSL",
                     "max_history": "Conversation History Turns",
-                    "streaming_enabled": "Buffer Streaming Responses"
+                    "streaming_enabled": "Buffer Streaming Responses",
+                    "persistent_chat_enabled": "Show Conversations in Open WebUI"
+                },
+                "data_description": {
+                    "persistent_chat_enabled": "Create and update a persistent Open WebUI chat for each Home Assistant conversation so it appears in the Open WebUI chat list."
                 }
             },
             "model_config": {

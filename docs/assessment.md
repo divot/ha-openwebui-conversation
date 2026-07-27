@@ -93,10 +93,15 @@ field.
    OpenAI-style `tools` field is never injected.
 4. `OpenWebUIApiClient` calls `POST /api/chat/completions`, either decoding JSON
    or buffering SSE/NDJSON to a final response.
-5. `response.extract_assistant_text` returns only user-facing text. It ignores
+5. When the General Settings persistence option is enabled, the integration
+   creates or updates `/api/v1/chats`, includes `chat_id` and the assistant
+   message `id` on the completion, and mirrors the completed history back to
+   the native chat. The local Home Assistant-to-Open WebUI chat-ID mapping
+   survives entry reloads. The default remains stateless.
+6. `response.extract_assistant_text` returns only user-facing text. It ignores
    reasoning, tool structures, and citation metadata, prefers the final
    post-tool assistant message, and rejects empty output.
-6. The final `AssistantContent` is added to `ChatLog`, and an `IntentResponse`
+7. The final `AssistantContent` is added to `ChatLog`, and an `IntentResponse`
    suitable for TTS is returned with Home Assistant's local conversation ID.
 
 ## Modern Home Assistant comparison

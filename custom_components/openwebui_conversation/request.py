@@ -31,6 +31,8 @@ def build_chat_completion_payload(
     web_search: bool,
     server_side_tools_enabled: bool,
     tool_ids: str | Iterable[str] | None,
+    chat_id: str | None = None,
+    message_id: str | None = None,
 ) -> dict[str, Any]:
     """Build a payload for ``POST /api/chat/completions``.
 
@@ -49,5 +51,10 @@ def build_chat_completion_payload(
 
     if server_side_tools_enabled and (normalized_ids := normalize_tool_ids(tool_ids)):
         payload["tool_ids"] = normalized_ids
+
+    if chat_id:
+        payload["chat_id"] = chat_id
+        if message_id:
+            payload["id"] = message_id
 
     return payload
