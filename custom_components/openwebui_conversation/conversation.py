@@ -12,7 +12,7 @@ from homeassistant.components.conversation.chat_log import AssistantContent, Cha
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import intent
+from homeassistant.helpers import device_registry as dr, intent
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -48,6 +48,7 @@ from .const import (
     DEFAULT_TOOL_IDS,
     DEFAULT_VERIFY_SSL,
     DO_SEARCH_INTENT,
+    DOMAIN,
     LOGGER,
 )
 from .exceptions import ApiClientError
@@ -70,6 +71,7 @@ class OpenWebUIAgent(
     """OpenWebUI conversation agent."""
 
     _attr_has_entity_name = True
+    _attr_name = None
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the agent."""
@@ -96,8 +98,15 @@ class OpenWebUIAgent(
             CONF_SEARCH_RESULT_PREFIX, DEFAULT_SEARCH_RESULT_PREFIX
         )
         self.lang = entry.options.get(CONF_LANGUAGE_CODE, DEFAULT_LANGUAGE_CODE).strip()
-        self._attr_name = entry.title
         self._attr_unique_id = entry.entry_id
+        self._attr_device_info = dr.DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer="Open WebUI",
+            model=entry.options.get(CONF_MODEL, DEFAULT_MODEL),
+            configuration_url=entry.data[CONF_BASE_URL],
+            entry_type=dr.DeviceEntryType.SERVICE,
+        )
         self.strip_markdown = entry.options.get(
             CONF_STRIP_MARKDOWN, DEFAULT_STRIP_MARKDOWN
         )
