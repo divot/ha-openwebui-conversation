@@ -87,6 +87,19 @@ class OpenWebUIApiClient:
             raise ApiJsonError("Open WebUI returned a malformed models response")
         return response
 
+    async def async_get_tools(self) -> list[dict[str, Any]]:
+        """Get tools available to the authenticated Open WebUI user."""
+        response = await self._api_wrapper(
+            method="get",
+            url=f"{self._base_url}/api/v1/tools/",
+            headers=self._auth_headers,
+        )
+        if not isinstance(response, list) or not all(
+            isinstance(tool, dict) for tool in response
+        ):
+            raise ApiJsonError("Open WebUI returned a malformed tools response")
+        return response
+
     async def async_create_chat(self, chat: dict[str, Any]) -> str:
         """Create a persistent chat and return its Open WebUI ID."""
         response = await self._api_wrapper(

@@ -87,7 +87,7 @@ When **Show Conversations in Open WebUI** is enabled, chats appear with a
 the mapping between its conversation ID and Open WebUI's chat ID; Open WebUI
 stores the mirrored message history. If API-key endpoint restrictions are
 enabled in Open WebUI, allow the `/api/v1/chats` endpoints in addition to
-`/api/models` and `/api/chat/completions`.
+`/api/models`, `/api/v1/tools/`, and `/api/chat/completions`.
 
 Persistent completions include Open WebUI's `chat_id` and assistant message
 `id`. They deliberately omit `session_id`: that field selects Open WebUI's
@@ -111,17 +111,18 @@ Tools are opt-in and least-privilege. Enabling the option does not silently expo
 | Option | Description |
 | ------ | ----------- |
 | Enable Server-side Tools | Include explicitly configured Open WebUI `tool_ids` in `/api/chat/completions` requests. |
-| Tool IDs | One Open WebUI tool ID per line. Blank lines and duplicates are removed. IDs are not restricted to MCP. |
+| Tools | Select one or more tools available to the Open WebUI API user. Display names come from Open WebUI while stable IDs are stored. |
 
-Example:
+The tool list is loaded from Open WebUI's permission-filtered
+`GET /api/v1/tools/` endpoint. When an entry has never saved a tool selection,
+tools attached to the selected Open WebUI model and visible to the API user are
+initially selected. Once a selection is saved, it always takes precedence over
+model defaults. Previously saved, deleted, or custom IDs remain editable if
+discovery is unavailable.
 
-```text
-server:mcp:home-assistant
-some-workspace-tool-id
-server:some-openapi-server-id
-```
-
-Current Open WebUI exposes permission-filtered tool metadata at `GET /api/v1/tools/`. You can also inspect the browser network request made when enabling a tool in an Open WebUI chat. Store the returned stable `id`, not its display name. Tool discovery is intentionally not required by this first implementation.
+The selector accepts custom stable IDs for servers or Open WebUI versions that
+do not expose all desired entries through discovery. IDs are not restricted to
+MCP.
 
 #### Search Configuration
 Options related to performing a web search with OpenWebUI. The agent will perform a web search through OpenWebUI and have the model summarize the results.
@@ -179,7 +180,7 @@ No config-entry migration is required. Existing entries keep their prior non-too
 * An Open WebUI chat that was deleted or became inaccessible is replaced on the next turn when the API key still has chat-creation access.
 * Buffered SSE is transport support, not progressive Home Assistant speech. It intentionally withholds intermediate tool calls, status JSON, and reasoning.
 * Tool-enabled streaming behavior varies by Open WebUI version and model function-calling mode. Keep buffered streaming disabled until the included contract probe passes against your deployed version.
-* Tool discovery remains manual in the first release.
+* Tool discovery reflects the configured API user's current Open WebUI access. Unavailable saved IDs remain visible until removed.
 * Reauthentication and config-entry reconfiguration are follow-up work; replace an entry to change its base URL or API key.
 * A model that cannot reliably produce tool calls may ignore tools or return a tool error. Open WebUI/model configuration, not this integration, owns that capability.
 

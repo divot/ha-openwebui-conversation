@@ -5,8 +5,9 @@ work. The following text is ready for maintainer review.
 
 This is the historical proposal for the server-side tools work. Persistent
 Open WebUI chats were subsequently added as a separate, disabled-by-default
-General Settings option; see the README and API contract for the current
-behavior.
+General Settings option, and the manual tool-ID field was subsequently replaced
+with permission-aware discovery and a multiselect. See the README and API
+contract for the current behavior.
 
 ## Draft comment for issue #37
 
@@ -113,8 +114,8 @@ normalization tests, no-`tools` invariant, and final-text safety.
 
 ## Known limitations for release notes
 
-- Tool IDs are entered manually; permission-aware discovery is not yet exposed
-  in the options UI.
+- Tool discovery reflects the configured API user's current permissions; saved
+  custom or unavailable IDs remain editable until removed.
 - Persistent Open WebUI chat records are a separate opt-in feature; the default
   direct-completion path remains stateless.
 - Streaming is buffered rather than progressively spoken and is disabled by
@@ -127,14 +128,12 @@ normalization tests, no-`tools` invariant, and final-text safety.
 
 ## Follow-up roadmap
 
-1. Permission-aware tool discovery from `GET /api/v1/tools/`, storing IDs and
-   showing names, with refresh/deleted-tool/manual fallback handling.
-2. Reauthentication and reconfiguration for API keys and base URLs.
-3. Live versioned contract fixtures for Open WebUI native/legacy function
+1. Reauthentication and reconfiguration for API keys and base URLs.
+2. Live versioned contract fixtures for Open WebUI native/legacy function
    calling and representative providers.
-4. Progressive Home Assistant streaming only when speculative pre-tool text and
+3. Progressive Home Assistant streaming only when speculative pre-tool text and
    final-message replacement can be handled safely.
-5. Additional translations, brand assets, and release UI screenshots.
-6. More granular error categories when Open WebUI exposes stable structured
+4. Additional translations, brand assets, and release UI screenshots.
+5. More granular error categories when Open WebUI exposes stable structured
    error codes for unknown models/tools, MCP failures, search failures, and loop
    limits.

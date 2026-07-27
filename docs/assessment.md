@@ -122,7 +122,6 @@ confirmed.
 These are useful follow-ups, not blockers for the smallest feature:
 
 - reauthentication and base-URL/API-key reconfiguration flows;
-- permission-aware tool discovery with stable IDs and a manual fallback;
 - progressive Home Assistant streaming only after Open WebUI tool-loop behavior
   is stable and the final spoken response can be guaranteed;
 - translation contributions beyond English;

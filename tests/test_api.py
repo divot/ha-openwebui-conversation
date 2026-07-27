@@ -104,6 +104,30 @@ async def test_non_object_chat_response_is_rejected() -> None:
         )
 
 
+async def test_get_tools_returns_authenticated_tool_metadata() -> None:
+    """Tool discovery uses Open WebUI's permission-filtered tools endpoint."""
+    tools = [
+        {"id": "weather", "name": "Weather"},
+        {"id": "server:mcp:home-assistant", "name": "Home Assistant"},
+    ]
+    session = FakeSession(FakeResponse(json_data=tools))
+
+    result = await _client(session).async_get_tools()
+
+    assert result == tools
+    assert session.request_kwargs["url"].endswith("/api/v1/tools/")
+    assert session.request_kwargs["headers"]["Authorization"] == (
+        "Bearer top-secret-key"
+    )
+
+
+@pytest.mark.parametrize("response", [{}, ["not-a-tool"]])
+async def test_malformed_tools_response_is_rejected(response) -> None:
+    """Tool discovery requires a list of metadata objects."""
+    with pytest.raises(ApiJsonError, match="malformed tools response"):
+        await _client(FakeSession(FakeResponse(json_data=response))).async_get_tools()
+
+
 async def test_create_persistent_chat() -> None:
     """The native chat endpoint returns the server-generated chat ID."""
     session = FakeSession(FakeResponse(json_data={"id": "chat-id", "chat": {}}))

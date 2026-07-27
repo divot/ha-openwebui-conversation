@@ -15,6 +15,7 @@ from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
     BooleanSelectorConfig,
+    SelectOptionDict,
     TemplateSelector,
     TemplateSelectorConfig,
     TextSelector,
@@ -260,7 +261,54 @@ class OpenWebUIOptionsFlow(config_entries.OptionsFlow):
                 self.options.update(user_input)
                 return self.async_create_entry(title="", data=self.options)
 
-        schema = openwebui_schema_tools_config(self.options)
+        client = OpenWebUIApiClient(
+            base_url=cv.url_no_path(self.config_entry.data[CONF_BASE_URL]),
+            api_key=self.config_entry.data[CONF_API_KEY],
+            timeout=self.options.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
+            session=async_create_clientsession(self.hass),
+            verify_ssl=self.options.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL),
+        )
+        try:
+            tools = await client.async_get_tools()
+        except ApiClientError as exception:
+            LOGGER.exception("Unable to load Open WebUI tools: %s", exception)
+            tools = []
+            if "base" not in errors:
+                errors["base"] = "cannot_load_tools"
+
+        selected_tool_ids = normalize_tool_ids(self.options.get(CONF_TOOL_IDS))
+        if CONF_TOOL_IDS not in self.options:
+            try:
+                response = await client.async_get_models()
+                models = response.get("data")
+                if not isinstance(models, list):
+                    raise ApiClientError("Open WebUI returned a malformed models list")
+                model_tool_ids = _model_tool_ids(
+                    models,
+                    self.options.get(CONF_MODEL, DEFAULT_MODEL),
+                )
+                available_tool_ids = {
+                    tool["id"]
+                    for tool in tools
+                    if isinstance(tool.get("id"), str) and tool["id"]
+                }
+                selected_tool_ids = [
+                    tool_id
+                    for tool_id in model_tool_ids
+                    if tool_id in available_tool_ids
+                ]
+            except ApiClientError as exception:
+                LOGGER.exception(
+                    "Unable to load model-attached Open WebUI tools: %s",
+                    exception,
+                )
+
+        tool_options = _tool_select_options(tools, selected_tool_ids)
+        schema = openwebui_schema_tools_config(
+            self.options,
+            tool_options,
+            selected_tool_ids,
+        )
         return self.async_show_form(
             step_id="tools_config",
             data_schema=vol.Schema(schema),
@@ -389,10 +437,59 @@ def openwebui_schema_search_config(options: Mapping[str, Any]) -> dict:
     }
 
 
-def openwebui_schema_tools_config(options: Mapping[str, Any]) -> dict:
+def _model_tool_ids(models: list[Any], model_id: str) -> list[str]:
+    """Return tool IDs attached to the selected Open WebUI model."""
+    for model in models:
+        if not isinstance(model, dict) or model.get("id") != model_id:
+            continue
+        info = model.get("info")
+        meta = info.get("meta") if isinstance(info, dict) else model.get("meta")
+        if not isinstance(meta, dict):
+            return []
+        return normalize_tool_ids(meta.get("toolIds"))
+    return []
+
+
+def _tool_select_options(
+    tools: list[dict[str, Any]], selected_tool_ids: list[str]
+) -> list[SelectOptionDict]:
+    """Return named tool choices, retaining unavailable configured IDs."""
+    options: list[SelectOptionDict] = []
+    seen: set[str] = set()
+    for tool in tools:
+        tool_id = tool.get("id")
+        if not isinstance(tool_id, str) or not tool_id or tool_id in seen:
+            continue
+        name = tool.get("name")
+        options.append(
+            SelectOptionDict(
+                value=tool_id,
+                label=name if isinstance(name, str) and name else tool_id,
+            )
+        )
+        seen.add(tool_id)
+
+    for tool_id in selected_tool_ids:
+        if tool_id not in seen:
+            options.append(SelectOptionDict(value=tool_id, label=tool_id))
+
+    return options
+
+
+def openwebui_schema_tools_config(
+    options: Mapping[str, Any],
+    tool_options: list[SelectOptionDict] | None = None,
+    selected_tool_ids: list[str] | None = None,
+) -> dict:
     """Return a schema for explicit Open WebUI server-side tool IDs."""
     if not options:
         options = DEFAULT_OPTIONS
+    if selected_tool_ids is None:
+        selected_tool_ids = normalize_tool_ids(
+            options.get(CONF_TOOL_IDS, DEFAULT_TOOL_IDS)
+        )
+    if tool_options is None:
+        tool_options = _tool_select_options([], selected_tool_ids)
     return {
         vol.Required(
             CONF_SERVER_SIDE_TOOLS_ENABLED,
@@ -406,9 +503,15 @@ def openwebui_schema_tools_config(options: Mapping[str, Any]) -> dict:
         ): BooleanSelector(BooleanSelectorConfig()),
         vol.Optional(
             CONF_TOOL_IDS,
-            description={
-                "suggested_value": options.get(CONF_TOOL_IDS, DEFAULT_TOOL_IDS)
-            },
-            default=DEFAULT_TOOL_IDS,
-        ): TextSelector(TextSelectorConfig(multiline=True)),
+            description={"suggested_value": selected_tool_ids},
+            default=selected_tool_ids,
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=tool_options,
+                multiple=True,
+                mode=SelectSelectorMode.DROPDOWN,
+                custom_value=True,
+                sort=True,
+            )
+        ),
     }

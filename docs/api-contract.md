@@ -113,10 +113,17 @@ restrictions must allow `/api/v1/chats` for this option.
 ## Tool activation and discovery
 
 `GET /api/v1/tools/` returns tool metadata filtered for the authenticated user's
-access and also includes native MCP server entries. It is usable for manual
-lookup and is a candidate for future discovery. The first implementation keeps
-manual IDs because discovery UI needs deletion, refresh, permission, and
-fallback semantics and the endpoint is not necessary for request execution.
+access and also includes native MCP server entries. The options flow uses the
+returned names and stable IDs to populate a multiselect. It stores the existing
+newline-delimited ID representation for backwards compatibility.
+
+When no tool selection has ever been saved, the options flow reads
+`info.meta.toolIds` for the selected entry in `GET /api/models` and uses those
+model-attached IDs that are also visible in tool discovery as its initial
+selection. A saved selection, including an intentionally empty one, takes
+precedence. Saved IDs missing from discovery remain as custom choices so a
+deleted tool or temporary discovery failure cannot silently erase
+configuration.
 
 Tools visually attached to a model should not be assumed to activate on a
 plain direct API call. Open WebUI's automation backend explicitly resolves
@@ -264,8 +271,9 @@ streaming terminates, and that both search and MCP can run in one request.
    calling. It is not an MCP/Workspace tool ID.
 7. **Are model-attached tools automatic?** Not reliably for direct API calls;
    send explicit IDs.
-8. **Discovery?** Permission-filtered metadata is available from
-   `GET /api/v1/tools/`; manual ID entry is the stable first UI.
+8. **Discovery?** The multiselect is populated with permission-filtered metadata
+   from `GET /api/v1/tools/`. Model-attached IDs seed a never-configured entry,
+   while saved and custom IDs remain editable.
 9. **Does Open WebUI own the full loop?** Its current source and documented
    server-tool contract do. Exact direct non-streaming native behavior still
    requires the supplied live probe on the target version/provider.
@@ -295,9 +303,9 @@ streaming terminates, and that both search and MCP can run in one request.
 19. **Smallest upstreamable feature?** Keep both tools and persistent chats
     independently opt-in, preserve the legacy request when disabled, and cover
     request shapes, final-text safety, options, translations, and documentation.
-20. **Intentional follow-ups?** Tool discovery, reauth/reconfigure, progressive
-    streaming, broad HA API exposure, automatic tool enabling, and live
-    deployment mutation.
+20. **Intentional follow-ups?** Reauth/reconfigure, progressive streaming,
+    broad HA API exposure, automatic runtime tool enabling, and live deployment
+    mutation.
 
 ## Primary references
 

@@ -9,6 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.openwebui_conversation.const import (
     CONF_API_KEY,
     CONF_BASE_URL,
+    CONF_MODEL,
     CONF_PERSISTENT_CHAT_ENABLED,
     CONF_SERVER_SIDE_TOOLS_ENABLED,
     CONF_SERVICE_NAME,
@@ -17,7 +18,10 @@ from custom_components.openwebui_conversation.const import (
     CONF_VERIFY_SSL,
     DOMAIN,
 )
-from custom_components.openwebui_conversation.exceptions import ApiAuthError
+from custom_components.openwebui_conversation.exceptions import (
+    ApiAuthError,
+    ApiCommError,
+)
 
 
 async def test_new_install_validates_credentials(
@@ -98,7 +102,7 @@ async def test_new_install_rejects_invalid_api_key(
 async def test_existing_entry_tools_options_are_normalized(
     hass, enable_custom_integrations, setup_homeassistant_component
 ) -> None:
-    """An entry without new options can add normalized tool IDs in-place."""
+    """Multiselect values are normalized into the existing stored format."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -112,20 +116,209 @@ async def test_existing_entry_tools_options_are_normalized(
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] is FlowResultType.MENU
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"next_step_id": "tools_config"}
-    )
+    with (
+        patch(
+            "custom_components.openwebui_conversation.config_flow."
+            "OpenWebUIApiClient.async_get_tools",
+            return_value=[
+                {"id": "weather", "name": "Weather"},
+                {
+                    "id": "server:mcp:home-assistant",
+                    "name": "Home Assistant",
+                },
+            ],
+        ),
+        patch(
+            "custom_components.openwebui_conversation.config_flow."
+            "OpenWebUIApiClient.async_get_models",
+            return_value={"data": []},
+        ),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "tools_config"}
+        )
     assert result["type"] is FlowResultType.FORM
 
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
             CONF_SERVER_SIDE_TOOLS_ENABLED: True,
-            CONF_TOOL_IDS: " server:mcp:home-assistant\nweather\nweather\n",
+            CONF_TOOL_IDS: [
+                "server:mcp:home-assistant",
+                "weather",
+                "weather",
+            ],
         },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_TOOL_IDS] == "server:mcp:home-assistant\nweather"
+
+
+async def test_tools_options_are_multiselect_with_model_attached_defaults(
+    hass, enable_custom_integrations, setup_homeassistant_component
+) -> None:
+    """Available tools are named and model-attached tools are initially selected."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_SERVICE_NAME: "Test",
+            CONF_BASE_URL: "https://openwebui.example",
+            CONF_API_KEY: "secret-key",
+        },
+        options={CONF_MODEL: "test-model"},
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.openwebui_conversation.config_flow."
+            "OpenWebUIApiClient.async_get_tools",
+            return_value=[
+                {"id": "weather", "name": "Weather"},
+                {
+                    "id": "server:mcp:home-assistant",
+                    "name": "Home Assistant",
+                },
+                {"id": "notes", "name": "Notes"},
+            ],
+        ),
+        patch(
+            "custom_components.openwebui_conversation.config_flow."
+            "OpenWebUIApiClient.async_get_models",
+            return_value={
+                "data": [
+                    {
+                        "id": "test-model",
+                        "info": {
+                            "meta": {
+                                "toolIds": [
+                                    "server:mcp:home-assistant",
+                                    "weather",
+                                    "private-tool",
+                                ]
+                            }
+                        },
+                    }
+                ]
+            },
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "tools_config"}
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["data_schema"]({})[CONF_TOOL_IDS] == [
+        "server:mcp:home-assistant",
+        "weather",
+    ]
+    tool_selector = next(
+        selector
+        for marker, selector in result["data_schema"].schema.items()
+        if marker.schema == CONF_TOOL_IDS
+    )
+    assert tool_selector.config["multiple"] is True
+    assert tool_selector.config["custom_value"] is True
+    assert tool_selector.config["options"] == [
+        {"value": "weather", "label": "Weather"},
+        {
+            "value": "server:mcp:home-assistant",
+            "label": "Home Assistant",
+        },
+        {"value": "notes", "label": "Notes"},
+    ]
+
+
+async def test_tools_options_preserve_saved_and_unavailable_ids(
+    hass, enable_custom_integrations, setup_homeassistant_component
+) -> None:
+    """Saved choices take precedence and deleted tools remain editable."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_SERVICE_NAME: "Test",
+            CONF_BASE_URL: "https://openwebui.example",
+            CONF_API_KEY: "secret-key",
+        },
+        options={
+            CONF_MODEL: "test-model",
+            CONF_TOOL_IDS: "retired-tool\nweather",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.openwebui_conversation.config_flow."
+            "OpenWebUIApiClient.async_get_tools",
+            return_value=[{"id": "weather", "name": "Weather"}],
+        ),
+        patch(
+            "custom_components.openwebui_conversation.config_flow."
+            "OpenWebUIApiClient.async_get_models",
+        ) as models,
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "tools_config"}
+        )
+
+    assert result["data_schema"]({})[CONF_TOOL_IDS] == [
+        "retired-tool",
+        "weather",
+    ]
+    tool_selector = next(
+        selector
+        for marker, selector in result["data_schema"].schema.items()
+        if marker.schema == CONF_TOOL_IDS
+    )
+    assert tool_selector.config["options"] == [
+        {"value": "weather", "label": "Weather"},
+        {"value": "retired-tool", "label": "retired-tool"},
+    ]
+    models.assert_not_awaited()
+
+
+async def test_tools_options_keep_saved_ids_when_discovery_fails(
+    hass, enable_custom_integrations, setup_homeassistant_component
+) -> None:
+    """A discovery error is visible without discarding saved custom IDs."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_SERVICE_NAME: "Test",
+            CONF_BASE_URL: "https://openwebui.example",
+            CONF_API_KEY: "secret-key",
+        },
+        options={CONF_TOOL_IDS: "server:mcp:home-assistant"},
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.openwebui_conversation.config_flow."
+        "OpenWebUIApiClient.async_get_tools",
+        side_effect=ApiCommError("unavailable"),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "tools_config"}
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_load_tools"}
+    assert result["data_schema"]({})[CONF_TOOL_IDS] == ["server:mcp:home-assistant"]
+    tool_selector = next(
+        selector
+        for marker, selector in result["data_schema"].schema.items()
+        if marker.schema == CONF_TOOL_IDS
+    )
+    assert tool_selector.config["options"] == [
+        {
+            "value": "server:mcp:home-assistant",
+            "label": "server:mcp:home-assistant",
+        }
+    ]
 
 
 async def test_general_options_include_persistent_chats(
@@ -172,14 +365,26 @@ async def test_tools_options_require_an_explicit_id(
     )
     entry.add_to_hass(hass)
 
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"next_step_id": "tools_config"}
-    )
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"],
-        {CONF_SERVER_SIDE_TOOLS_ENABLED: True, CONF_TOOL_IDS: "\n  "},
-    )
+    with (
+        patch(
+            "custom_components.openwebui_conversation.config_flow."
+            "OpenWebUIApiClient.async_get_tools",
+            return_value=[],
+        ),
+        patch(
+            "custom_components.openwebui_conversation.config_flow."
+            "OpenWebUIApiClient.async_get_models",
+            return_value={"data": []},
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "tools_config"}
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_SERVER_SIDE_TOOLS_ENABLED: True, CONF_TOOL_IDS: []},
+        )
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "tool_ids_required"}

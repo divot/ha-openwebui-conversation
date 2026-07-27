@@ -65,11 +65,15 @@
                 "title": "Open WebUI Server-side Tools",
                 "data": {
                     "server_side_tools_enabled": "Enable Server-side Tools",
-                    "tool_ids": "Tool IDs (one per line)"
+                    "tool_ids": "Tools"
+                },
+                "data_description": {
+                    "tool_ids": "Select tools available to the Open WebUI API user. Tools attached to the selected model are initially selected when no tools have been saved."
                 }
             }
         },
         "error": {
+            "cannot_load_tools": "Unable to load tools from Open WebUI. Saved or custom tool IDs remain available.",
             "tool_ids_required": "Enter at least one tool ID when server-side tools are enabled"
         }
     }
