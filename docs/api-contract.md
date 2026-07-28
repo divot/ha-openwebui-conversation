@@ -82,12 +82,17 @@ Web search plus MCP in one turn:
 }
 ```
 
-Built-in web search is a feature/capability, not a generic `tool_id`. In current
-source, `features.web_search: true` enters either native agentic search or the
-legacy RAG preprocessing path. It still requires global search configuration,
-the API user's web-search permission, selected-model support/configuration, and
-the relevant function-calling mode. A true request flag cannot overcome a
-disabled provider, permission, or model capability.
+Built-in web search is a feature/capability, not a generic `tool_id`. Browser
+requests with a WebSocket `session_id` can use the native agentic
+`search_web` tool. Direct API callers do not receive hidden builtin tools, even
+when they explicitly send `features.web_search: true`; Open WebUI must route
+that explicit direct request through its synchronous RAG preprocessing path.
+The companion Open WebUI patch does so for sessionless callers while preserving
+native search for browser sessions.
+
+Both paths still require global search configuration, the API user's web-search
+permission, and selected-model support/configuration. A true request flag
+cannot overcome a disabled provider, permission, or model capability.
 
 Do **not** send this shape:
 

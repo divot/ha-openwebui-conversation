@@ -146,6 +146,13 @@ To enable web search in OpenWebUI, see [OpenWebUI's documentation on Web Search]
 
 The integration sends `features.web_search: true` only when a configured search sentence matches. Built-in agentic search also requires web search to be globally configured, allowed for the API-key user, and enabled as a capability for the selected model. Web search is not represented as an MCP `tool_id`.
 
+Open WebUI browser requests carry a WebSocket `session_id` and can receive the
+native `search_web` builtin. API callers such as this integration do not have
+that browser session. Native-function-calling deployments therefore need an
+Open WebUI build that routes an explicit sessionless
+`features.web_search: true` request through the synchronous web-search/RAG
+handler; otherwise the model receives neither search results nor a search tool.
+
 ## Home Assistant MCP setup
 
 1. In Home Assistant, add the **Model Context Protocol Server** integration and select only the LLM APIs you intend to expose.
@@ -177,6 +184,7 @@ The integration does not log request transcripts, full payloads, response/error 
 | Home Assistant MCP connects but cannot control an entity | Expose the entity to Assist and verify that the selected MCP endpoint/API provides the required intent. |
 | Tool claims success but nothing changed | Inspect Open WebUI's tool result and Home Assistant logs. Do not assume a model's natural-language claim proves an action succeeded. |
 | Web search does not run | Configure a search provider globally, allow web search for the API user, enable the model capability, and use one of the configured trigger sentences. |
+| Native web search claims it has no access | Confirm the Open WebUI build handles sessionless `features.web_search: true` requests. Browser-only native builtin injection requires a WebSocket `session_id`; direct API requests need the synchronous search fallback. |
 | Chats do not appear in Open WebUI | Enable **Show Conversations in Open WebUI** and allow the API key to create and update `/api/v1/chats` records. Chat persistence failures are logged while the conversation falls back to a stateless completion. |
 | TLS failure | Use a certificate trusted by the caller, or explicitly disable verification only on a trusted private network. |
 | Timeout or interrupted stream | Increase API Timeout, check Open WebUI's tool/MCP timeouts, and disable buffered streaming while diagnosing. |

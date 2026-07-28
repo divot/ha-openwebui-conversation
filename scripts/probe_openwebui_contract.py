@@ -173,6 +173,22 @@ def _stream_summary(body: bytes) -> dict[str, Any]:
     return summary
 
 
+def _matches_expectation(summary: dict[str, Any], expectation: str) -> bool:
+    """Return whether a content-free response summary proves the contract."""
+    if expectation == "final":
+        return bool(summary.get("has_final_text"))
+    if expectation == "tool_call":
+        return bool(summary.get("has_tool_calls")) and not bool(
+            summary.get("has_final_text")
+        )
+    if expectation == "search":
+        search_evidence = bool(summary.get("has_sources")) or bool(
+            summary.get("source_events")
+        )
+        return bool(summary.get("has_final_text")) and search_evidence
+    return True
+
+
 def _run_probe(
     name: str,
     base_url: str,
@@ -190,14 +206,7 @@ def _run_probe(
             if content_type == "application/json"
             else _stream_summary(body)
         )
-        if expectation == "final":
-            matched_expectation = bool(summary.get("has_final_text"))
-        elif expectation == "tool_call":
-            matched_expectation = bool(summary.get("has_tool_calls")) and not bool(
-                summary.get("has_final_text")
-            )
-        else:
-            matched_expectation = True
+        matched_expectation = _matches_expectation(summary, expectation)
         _emit(
             {
                 "probe": name,
@@ -305,7 +314,7 @@ def main() -> int:
             "features": {"web_search": True},
             "stream": False,
         }
-        probes.append(("web_search", search_payload, "final"))
+        probes.append(("web_search", search_payload, "search"))
         if args.tool_id:
             probes.append(
                 (

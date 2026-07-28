@@ -94,7 +94,9 @@ tools itself.
 - Centralize request construction and send explicit `tool_ids` without an
   OpenAI-compatible `tools` field.
 - Preserve the existing `features.web_search` contract and allow search and
-  tools in one request.
+  tools in one request. For sessionless direct API calls, route an explicit
+  search request through the synchronous RAG handler because browser-only
+  native builtin injection requires a WebSocket `session_id`.
 - Use Home Assistant's supported `_async_handle_message`/`ChatLog` lifecycle,
   and bound prior history. Persistent Open WebUI chats remain outside this
   tools-only proposal.
