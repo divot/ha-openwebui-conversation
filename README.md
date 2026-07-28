@@ -79,7 +79,7 @@ Settings relating to the integration itself.
 | Language Code | The code for your preferred language. This is set to English (`en`) by default. A list of codes can be found [here][lang-codes]. |
 | Verify SSL    | Verify SSL certificates for HTTPS. Disable verification if you are using self signed certificates.                               |
 | Conversation History Turns | Maximum prior user/assistant turns sent from Home Assistant's `ChatLog`. Defaults to 10. |
-| Buffer Streaming Responses | Request SSE from Open WebUI but buffer it until a final answer is available. Disabled by default; see Known limitations. |
+| Buffer Streaming Responses | Request and buffer streaming for ordinary conversations. Disabled by default. Native server-side tools always use buffered streaming because Open WebUI runs their tool loop in its streaming handler. |
 | Show Conversations in Open WebUI | Create and update one persistent Open WebUI chat for each Home Assistant conversation. Disabled by default. |
 
 When **Show Conversations in Open WebUI** is enabled, chats appear with a
@@ -92,7 +92,9 @@ enabled in Open WebUI, allow the `/api/v1/chats` endpoints in addition to
 Persistent completions include Open WebUI's `chat_id` and assistant message
 `id`. They deliberately omit `session_id`: that field selects Open WebUI's
 WebSocket/background-task response path, while this integration needs the final
-answer returned directly over HTTP.
+answer returned directly over HTTP. Open WebUI must include the direct-response
+fix that returns the streaming handler's final `data` payload; affected stock
+v0.10.2 builds instead return JSON `null`.
 
 #### Model Configuration
 The language model you want to use.
@@ -112,6 +114,13 @@ Tools are opt-in and least-privilege. Enabling the option does not silently expo
 | ------ | ----------- |
 | Enable Server-side Tools | Include explicitly configured Open WebUI `tool_ids` in `/api/chat/completions` requests. |
 | Tools | Select one or more tools available to the Open WebUI API user. Display names come from Open WebUI while stable IDs are stored. |
+
+Native server-side tools automatically set `stream: true`. If sidebar chat
+persistence is disabled or unavailable, the integration supplies an ephemeral
+`local:` chat ID and assistant message ID. This activates Open WebUI's
+server-side native tool loop without creating a stored chat or requiring a
+browser/WebSocket session. Only the authoritative final assistant message is
+returned to Home Assistant.
 
 The tool list is loaded from Open WebUI's permission-filtered
 `GET /api/v1/tools/` endpoint. When an entry has never saved a tool selection,
@@ -163,6 +172,8 @@ The integration does not log request transcripts, full payloads, response/error 
 | `401` or `403` | Recreate the Open WebUI API key, confirm the key's user can access the model/tool, and complete any per-user MCP OAuth flow in Open WebUI. |
 | Model not found | Select a model returned by Open WebUI's `/api/models` endpoint. Model presets are supported. |
 | Tool ID is ignored or missing | Confirm the exact ID with `/api/v1/tools/`, enable Server-side Tools, and do not configure a caller-provided OpenAI `tools` field in filters. |
+| `unfinished native tool call` | Open WebUI returned the provider's first tool-call turn without executing it. Confirm that tools are using buffered streaming and that the request contains a chat/message context. |
+| `consumed the stream without returning its final response` | The Open WebUI direct native-tool path completed through its event emitter but returned JSON `null`. Apply or upgrade to an Open WebUI build that returns the streaming handler's final `data` payload. |
 | Home Assistant MCP connects but cannot control an entity | Expose the entity to Assist and verify that the selected MCP endpoint/API provides the required intent. |
 | Tool claims success but nothing changed | Inspect Open WebUI's tool result and Home Assistant logs. Do not assume a model's natural-language claim proves an action succeeded. |
 | Web search does not run | Configure a search provider globally, allow web search for the API user, enable the model capability, and use one of the configured trigger sentences. |
@@ -179,7 +190,7 @@ No config-entry migration is required. Existing entries keep their prior non-too
 * Persistent Open WebUI chats are optional. When enabled, Open WebUI retains a copy of the Home Assistant conversation until it is deleted there; only the chat-ID mapping is retained in Home Assistant.
 * An Open WebUI chat that was deleted or became inaccessible is replaced on the next turn when the API key still has chat-creation access.
 * Buffered SSE is transport support, not progressive Home Assistant speech. It intentionally withholds intermediate tool calls, status JSON, and reasoning.
-* Tool-enabled streaming behavior varies by Open WebUI version and model function-calling mode. Keep buffered streaming disabled until the included contract probe passes against your deployed version.
+* Native server-side tools require Open WebUI's streaming handler and a build that returns its final payload to synchronous direct API callers. Stock v0.10.2 returns JSON `null` after successfully completing event-emitter-backed streams.
 * Tool discovery reflects the configured API user's current Open WebUI access. Unavailable saved IDs remain visible until removed.
 * Reauthentication and config-entry reconfiguration are follow-up work; replace an entry to change its base URL or API key.
 * A model that cannot reliably produce tool calls may ignore tools or return a tool error. Open WebUI/model configuration, not this integration, owns that capability.

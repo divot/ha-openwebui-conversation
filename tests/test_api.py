@@ -204,6 +204,79 @@ async def test_stream_accepts_ndjson_and_unterminated_done_marker() -> None:
     assert result["choices"][0]["message"]["content"] == "Hello world"
 
 
+async def test_stream_accepts_responses_api_text_events() -> None:
+    """Responses API deltas and authoritative done text are buffered."""
+    chunks = [
+        b'data: {"type":"response.output_text.delta","delta":"Hello"}\r\n\r\n',
+        b'data: {"type":"response.output_text.delta","delta":" world"}\r\n\r\n',
+        b'data: {"type":"response.output_text.done","text":"Hello world"}\r\n\r\n',
+        b"data: [DONE]\r\n\r\n",
+    ]
+    result = await _client(FakeSession(FakeResponse(chunks=chunks))).async_generate(
+        {"stream": True}
+    )
+    assert result["choices"][0]["message"]["content"] == "Hello world"
+
+
+async def test_direct_final_json_from_openwebui_is_buffered() -> None:
+    """Open WebUI's synchronous native-loop result may be plain final JSON."""
+    chunks = [
+        (
+            b'{"done":true,"output":['
+            b'{"type":"function_call","name":"get_state"},'
+            b'{"type":"function_call_output","output":"private tool result"},'
+            b'{"type":"message","role":"assistant","content":'
+            b'[{"type":"output_text","text":"Final answer"}]}]}'
+        )
+    ]
+    result = await _client(FakeSession(FakeResponse(chunks=chunks))).async_generate(
+        {"stream": True}
+    )
+    assert result["choices"][0]["message"]["content"] == "Final answer"
+
+
+async def test_stream_tool_call_without_final_answer_is_actionable() -> None:
+    """A provider first-turn tool call is not mistaken for spoken output."""
+    chunks = [
+        b'data: {"choices":[{"delta":{"content":"I will check."}}]}\n\n',
+        (
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            b'"id":"call-1","function":{"name":"get_state","arguments":"{}"}}]},'
+            b'"finish_reason":"tool_calls"}]}\n\n'
+        ),
+        b"data: [DONE]\n\n",
+    ]
+    with pytest.raises(ApiJsonError, match="unfinished native tool call"):
+        await _client(FakeSession(FakeResponse(chunks=chunks))).async_generate(
+            {"stream": True}
+        )
+
+
+async def test_responses_pre_tool_text_is_discarded() -> None:
+    """A Responses API preamble is not authoritative after a function call."""
+    chunks = [
+        (b'data: {"type":"response.output_text.done","text":"I will check."}\n\n'),
+        (
+            b'data: {"type":"response.output_item.added","item":'
+            b'{"type":"function_call","name":"get_state"}}\n\n'
+        ),
+        b"data: [DONE]\n\n",
+    ]
+    with pytest.raises(ApiJsonError, match="unfinished native tool call"):
+        await _client(FakeSession(FakeResponse(chunks=chunks))).async_generate(
+            {"stream": True}
+        )
+
+
+@pytest.mark.parametrize("chunks", [[b"null"], [b"null\n"]])
+async def test_consumed_openwebui_stream_null_is_actionable(chunks) -> None:
+    """The affected Open WebUI direct path returns JSON null after consuming SSE."""
+    with pytest.raises(ApiJsonError, match="consumed the stream"):
+        await _client(FakeSession(FakeResponse(chunks=chunks))).async_generate(
+            {"stream": True}
+        )
+
+
 async def test_malformed_stream_event() -> None:
     """Malformed SSE data is reported clearly."""
     client = _client(FakeSession(FakeResponse(chunks=[b"data: not-json\n\n"])))

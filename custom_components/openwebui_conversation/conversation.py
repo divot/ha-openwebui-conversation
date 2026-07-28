@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any, Literal
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from hassil import recognize
 from hassil.intents import Intents
@@ -421,9 +421,15 @@ class OpenWebUIAgent(
         tools_enabled = self.entry.options.get(
             CONF_SERVER_SIDE_TOOLS_ENABLED, DEFAULT_SERVER_SIDE_TOOLS_ENABLED
         )
-        stream = self.entry.options.get(
+        configured_stream = self.entry.options.get(
             CONF_STREAMING_ENABLED, DEFAULT_STREAMING_ENABLED
         )
+        tools_active = tools_enabled and bool(tool_ids)
+        # Open WebUI's native server-side tool loop is implemented by its
+        # streaming response handler. Keep the user option for ordinary
+        # conversations, but never send a native tool request in the
+        # non-streaming mode that returns only the first tool-call turn.
+        stream = configured_stream or tools_active
         messages = self._messages_from_chat_log(chat_log, prompt)
         persistent_chat_enabled = self.entry.options.get(
             CONF_PERSISTENT_CHAT_ENABLED, DEFAULT_PERSISTENT_CHAT_ENABLED
@@ -431,6 +437,7 @@ class OpenWebUIAgent(
         conversation_id = chat_log.conversation_id
         chat_id: str | None = None
         message_id: str | None = None
+        persistent_chat_id: str | None = None
 
         if persistent_chat_enabled and conversation_id:
             draft_chat, message_id = self._build_persistent_chat(
@@ -439,14 +446,23 @@ class OpenWebUIAgent(
                 current_prompt=prompt,
                 model=model,
             )
-            chat_id = await self._async_prepare_persistent_chat(
+            persistent_chat_id = await self._async_prepare_persistent_chat(
                 conversation_id, draft_chat
             )
+            chat_id = persistent_chat_id
         elif persistent_chat_enabled:
             LOGGER.warning(
                 "Cannot create a persistent Open WebUI chat without a "
                 "Home Assistant conversation ID"
             )
+
+        if tools_active and not chat_id:
+            # Open WebUI only enters its native server-tool loop when both
+            # chat_id and message id are present. A local chat provides the
+            # required event-emitter context without creating a sidebar chat
+            # or requiring a WebSocket session.
+            chat_id = f"local:{uuid4()}"
+            message_id = str(uuid4())
 
         payload = build_chat_completion_payload(
             model=model,
@@ -467,11 +483,11 @@ class OpenWebUIAgent(
             tool_ids if tools_enabled else [],
             search,
             stream,
-            bool(chat_id),
+            bool(persistent_chat_id),
         )
         response = await self.client.async_generate(payload)
 
-        if chat_id and conversation_id:
+        if persistent_chat_id and conversation_id:
             completed_chat, _ = self._build_persistent_chat(
                 chat_log=chat_log,
                 conversation_id=conversation_id,
@@ -479,7 +495,7 @@ class OpenWebUIAgent(
                 model=model,
                 response_text=extract_assistant_text(response),
             )
-            await self._async_finish_persistent_chat(chat_id, completed_chat)
+            await self._async_finish_persistent_chat(persistent_chat_id, completed_chat)
 
         return response
 

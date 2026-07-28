@@ -1,10 +1,29 @@
 # Open WebUI and Home Assistant API contract
 
 This document separates source-verified behavior from live behavior. Open WebUI
-v0.10.2 source (`ecd48e2f`) and Home Assistant current/2025.6.3 source were
-reviewed. Unit tests exercise recorded shapes through mocked HTTP. No credentials
-or disposable instances were supplied, so native tool-loop execution, real MCP
-effects, and provider-specific streaming have **not** been live-verified.
+v0.10.2 source (`ecd48e2f`) plus the deployment's unrelated MCP strict-schema
+change (`56c1c9186`) and Home Assistant current/2025.6.3 source were reviewed.
+On 2026-07-27, the direct API contract was live-verified against that Open WebUI
+deployment, CLIProxyAPI translating OAuth-backed ChatGPT `gpt-5.6-sol`, and a
+Home Assistant MCP server. Probes recorded only response structure and counts;
+they did not print prompts, response text, tool arguments/results, entity data,
+headers, or credentials.
+
+## Live native-tool findings
+
+| Request mode | Chat/message context | Observed result |
+| --- | --- | --- |
+| Non-streaming, no tools | None | Final Chat Completions text, `finish_reason: stop`. |
+| Non-streaming, native MCP tool | None | Empty assistant content, one `tool_calls` item, `finish_reason: tool_calls`; no server loop. |
+| Streaming, no tools | None | Standard Chat Completions SSE deltas and `[DONE]`. |
+| Streaming, native MCP tool | None | Standard tool-call deltas, `finish_reason: tool_calls`, and `[DONE]`; no server loop. |
+| Streaming, no tools | `chat_id` + message ID | Open WebUI consumes the provider stream and returns JSON `null`. |
+| Streaming, native MCP tool | Persistent chat + message ID | Stored output contains `reasoning`, `function_call`, `function_call_output`, and a final assistant `message`; the HTTP response is JSON `null`. |
+| Non-streaming, legacy function calling | Model preset | MCP execution and final text succeed through the legacy planner/context path. |
+
+The persistent native-tool probe stored one function call, one function-call
+output, and one final assistant message. The temporary diagnostic chat was
+deleted after its structure was inspected.
 
 ## Endpoint and request shapes
 
@@ -166,34 +185,37 @@ The response parser speaks only `text`/`output_text` from the final assistant
 message. It ignores reasoning, function arguments/results, sources, and
 citations. Empty user-facing output is an error.
 
-For `stream: true`, the HTTP client accepts SSE `data:` lines and newline-
-delimited JSON. It handles OpenAI-style `choices[].delta.content`, `[DONE]`,
-Open WebUI `chat:completion` envelopes, `chat:message:error` envelopes, and a
-final `output` array. It buffers everything and returns one ordinary completion
-shape. Tool calls, status events, sources, and reasoning are not spoken.
-
-This is transport support, not proof that every Open WebUI/provider combination
-finishes a native server-side tool loop through a direct streaming request.
-Streaming remains off by default until the live probe passes.
+For `stream: true`, the HTTP client accepts SSE `data:` lines, newline-delimited
+JSON, and Open WebUI's synchronous final JSON payload. It handles OpenAI-style
+`choices[].delta.content`, Responses API output-text events, `[DONE]`, Open
+WebUI `chat:completion` envelopes, `chat:message:error` envelopes, and a final
+`output` array. It buffers everything and returns one ordinary completion
+shape. Tool calls, status events, sources, and reasoning are not spoken. A
+stream that ends after a tool call without authoritative final text is an
+actionable error rather than a partial spoken response.
 
 ## Tool-loop findings and limitations
 
-Open WebUI's source supports resolving `tool_ids`, MCP/OpenAPI function specs,
-tool invocation, result reinjection, and iterative final-response handling.
-Open WebUI's public direct-API documentation describes `tool_ids` as server-side
-tools. Source review also shows a distinction between legacy preprocessing and
-the richer native streaming response handler. Consequently:
+Open WebUI owns resolution, invocation, result reinjection, and iteration, but
+v0.10.2 exposes that native loop only inside its streaming response handler.
+That handler enters the loop only when an event emitter exists, and an event
+emitter requires both `chat_id` and assistant message ID. A request without
+those IDs receives the provider's first tool-call turn. A request with those
+IDs completes the loop and persists/emits the final output, but the synchronous
+direct path falls off the end of its coroutine and FastAPI serializes the
+implicit `None` as JSON `null`.
 
-- request construction and server-side resolution are source-verified;
-- the documented intent is that Open WebUI owns execution;
-- non-streaming response parsing waits for the HTTP response and expects final
-  text, but real native multi-step behavior is version/model dependent;
-- the exact direct-API stream sequence and fully iterated final response must be
-  confirmed against the deployed Open WebUI/model/provider;
-- `/api/chat/completed` runs `outlet()` filters after a direct chat. It is not
-  required to complete the tool loop or this direct request contract, but an
-  integration that promises outlet-filtered output must make that second call
-  on stable Open WebUI releases.
+The Open WebUI fix is to return the authoritative final `data` object already
+built, emitted, and persisted by `streaming_chat_response_handler`'s
+`response_handler`. Browser requests with `session_id` remain on the existing
+background-task/WebSocket path. The integration therefore:
+
+- forces `stream: true` whenever configured native server tools are active;
+- uses the real persistent chat/message IDs when available;
+- otherwise supplies an ephemeral `local:` chat ID and UUID message ID, which
+  creates event-emitter context without a stored chat or WebSocket session;
+- accepts the final JSON `output` returned by the fixed synchronous path;
+- diagnoses stock v0.10.2's JSON `null` response explicitly.
 
 Home Assistant supplies bounded full message history on every turn. Persistent
 Open WebUI chats are disabled by default. When enabled, the integration creates
@@ -274,12 +296,13 @@ streaming terminates, and that both search and MCP can run in one request.
 8. **Discovery?** The multiselect is populated with permission-filtered metadata
    from `GET /api/v1/tools/`. Model-attached IDs seed a never-configured entry,
    while saved and custom IDs remain editable.
-9. **Does Open WebUI own the full loop?** Its current source and documented
-   server-tool contract do. Exact direct non-streaming native behavior still
-   requires the supplied live probe on the target version/provider.
-10. **Streaming?** It can include deltas, status/tool/source events, errors, a
-    final output, and `[DONE]`. The client buffers and speaks only the final
-    assistant text. Version/provider behavior is live-unverified.
+9. **Does Open WebUI own the full loop?** Yes, but native execution is confined
+   to its event-emitter streaming handler in v0.10.2. Non-streaming and
+   context-free streaming direct requests stop at the first tool call.
+10. **Streaming?** CLIProxyAPI emits standard Chat Completions SSE. Open WebUI
+    consumes that SSE when chat/message context is present, executes the full
+    loop, and must return its final structured `data` payload to the synchronous
+    direct caller. Stock v0.10.2 returns JSON `null` instead.
 11. **Secondary finalization?** Not for the server-side tool loop.
     `/api/chat/completed` is separately required if the caller needs `outlet()`
     filters to run and return their transformed output on stable releases; that

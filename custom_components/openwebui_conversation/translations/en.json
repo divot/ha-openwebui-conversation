@@ -43,6 +43,7 @@
                     "persistent_chat_enabled": "Show Conversations in Open WebUI"
                 },
                 "data_description": {
+                    "streaming_enabled": "Buffer streamed responses for ordinary conversations. Native server-side tools always use buffered streaming because Open WebUI runs their tool loop in its streaming handler.",
                     "persistent_chat_enabled": "Create and update a persistent Open WebUI chat for each Home Assistant conversation so it appears in the Open WebUI chat list."
                 }
             },
@@ -68,7 +69,7 @@
                     "tool_ids": "Tools"
                 },
                 "data_description": {
-                    "tool_ids": "Select tools available to the Open WebUI API user. Tools attached to the selected model are initially selected when no tools have been saved."
+                    "tool_ids": "Select tools available to the Open WebUI API user. Native tools automatically use buffered streaming and an Open WebUI chat context so only the final answer is returned."
                 }
             }
         },

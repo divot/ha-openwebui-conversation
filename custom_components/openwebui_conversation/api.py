@@ -20,7 +20,13 @@ from .exceptions import (
     ApiJsonError,
     ApiTimeoutError,
 )
-from .response import build_buffered_stream_response, extract_stream_event_text
+from .response import (
+    build_buffered_stream_response,
+    extract_stream_event_text,
+    stream_event_has_tool_call,
+    summarize_response_shape,
+    summarize_stream_event_shape,
+)
 
 _BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)[^\s,;\"']+")
 _SECRET_FIELD_PATTERN = re.compile(
@@ -31,6 +37,10 @@ _SECRET_FIELD_PATTERN = re.compile(
 def _decode_stream_line(raw_line: bytes) -> dict[str, Any] | None:
     """Decode one SSE or newline-delimited JSON line."""
     line = raw_line.decode("utf-8", "replace").strip()
+    if line == "null":
+        raise ApiJsonError(
+            "Open WebUI consumed the stream without returning its final response"
+        )
     if not line or line.startswith(":") or line.startswith("event:"):
         return None
     if line.startswith("data:"):
@@ -149,6 +159,9 @@ class OpenWebUIApiClient:
         )
         if not isinstance(response, dict):
             raise ApiJsonError("Open WebUI returned a malformed chat response")
+        LOGGER.debug(
+            "Open WebUI response shape: %s", summarize_response_shape(response)
+        )
         return response
 
     @property
@@ -200,6 +213,7 @@ class OpenWebUIApiClient:
                 await self._raise_for_status(response, url)
                 deltas: list[str] = []
                 final_text: str | None = None
+                saw_tool_call = False
                 buffer = b""
                 async for chunk in response.content.iter_any():
                     buffer += chunk
@@ -208,6 +222,17 @@ class OpenWebUIApiClient:
                         event = _decode_stream_line(raw_line)
                         if event is None:
                             continue
+                        LOGGER.debug(
+                            "Open WebUI stream event shape: %s",
+                            summarize_stream_event_shape(event),
+                        )
+                        if stream_event_has_tool_call(event):
+                            # Any text seen before a tool call is speculative.
+                            # A later authoritative post-tool message may
+                            # replace it, but it must never be spoken alone.
+                            saw_tool_call = True
+                            final_text = None
+                            deltas.clear()
                         delta, event_final = extract_stream_event_text(event)
                         if delta:
                             deltas.append(delta)
@@ -216,13 +241,25 @@ class OpenWebUIApiClient:
                 if buffer.strip():
                     event = _decode_stream_line(buffer)
                     if event is not None:
+                        LOGGER.debug(
+                            "Open WebUI stream event shape: %s",
+                            summarize_stream_event_shape(event),
+                        )
+                        if stream_event_has_tool_call(event):
+                            saw_tool_call = True
+                            final_text = None
+                            deltas.clear()
                         delta, event_final = extract_stream_event_text(event)
                         if delta:
                             deltas.append(delta)
                         if event_final is not None:
                             final_text = event_final
 
-                result = build_buffered_stream_response(deltas, final_text)
+                result = build_buffered_stream_response(
+                    deltas,
+                    final_text,
+                    saw_tool_call=saw_tool_call,
+                )
                 LOGGER.debug(
                     "Open WebUI request completed (path=%s, status=%s, elapsed=%.3fs, stream=true)",
                     urlsplit(url).path,

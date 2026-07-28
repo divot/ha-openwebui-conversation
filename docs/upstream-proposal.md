@@ -3,6 +3,45 @@
 No GitHub issue, comment, branch, commit, or pull request was created by this
 work. The following text is ready for maintainer review.
 
+## Open WebUI v0.10.2 direct native-tool fix
+
+Live testing found a separate Open WebUI defect that blocks the integration's
+native tool path. For a synchronous authenticated caller to
+`POST /api/chat/completions`:
+
+1. `stream: false` resolves `tool_ids` but returns the provider's first
+   `finish_reason: tool_calls` response without executing it.
+2. `stream: true` without chat/message context passes through the same
+   first-turn tool-call SSE.
+3. `stream: true` with `chat_id` and assistant message ID enters Open WebUI's
+   event-emitter handler, executes MCP, reinjects its result, and builds a final
+   `data` object containing the authoritative `output`.
+4. `response_handler` emits and persists that `data` object but has no return
+   statement. FastAPI therefore returns JSON `null` to the synchronous direct
+   caller.
+
+The minimal fix in
+`backend/open_webui/utils/middleware.py::streaming_chat_response_handler` is:
+
+```diff
+                 await outlet_filter_handler(ctx)
+                 await background_tasks_handler(ctx)
++                return data
+             except asyncio.CancelledError:
+```
+
+Browser requests that provide `session_id` still use the existing
+background-task/WebSocket branch, so their response contract is unchanged. The
+fixed synchronous path returns the same final object that Open WebUI already
+emits and stores. A regression test should assert that a streaming direct
+request with local chat/message context returns a final `output` object rather
+than JSON `null`.
+
+The companion integration change forces streaming for native server tools and
+supplies an ephemeral `local:` chat/message context when persistent sidebar
+chats are disabled. This activates the server-side loop without creating a
+stored chat or requiring a WebSocket session.
+
 This is the historical proposal for the server-side tools work. Persistent
 Open WebUI chats were subsequently added as a separate, disabled-by-default
 General Settings option, and the manual tool-ID field was subsequently replaced

@@ -1,12 +1,15 @@
 """Tests for Home Assistant chat-log request mapping."""
 
 from unittest.mock import AsyncMock
+from uuid import UUID
 
+from homeassistant.components import conversation
 from homeassistant.components.conversation.chat_log import (
     AssistantContent,
     ChatLog,
     UserContent,
 )
+from homeassistant.core import Context
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.openwebui_conversation.const import (
@@ -69,7 +72,7 @@ async def test_query_maps_options_to_one_request(hass) -> None:
                 CONF_MODEL: "test-model",
                 CONF_SERVER_SIDE_TOOLS_ENABLED: True,
                 CONF_TOOL_IDS: "server:mcp:home-assistant\nweather",
-                CONF_STREAMING_ENABLED: True,
+                CONF_STREAMING_ENABLED: False,
             }
         ),
     )
@@ -82,7 +85,12 @@ async def test_query_maps_options_to_one_request(hass) -> None:
     await agent.query("current request", chat_log, search=True)
 
     payload = agent.client.async_generate.await_args.args[0]
-    assert payload == {
+    assert payload["chat_id"].startswith("local:")
+    UUID(payload["chat_id"].removeprefix("local:"))
+    UUID(payload["id"])
+    assert {
+        key: value for key, value in payload.items() if key not in ("chat_id", "id")
+    } == {
         "model": "test-model",
         "messages": [{"role": "user", "content": "current request"}],
         "stream": True,
@@ -90,6 +98,86 @@ async def test_query_maps_options_to_one_request(hass) -> None:
         "tool_ids": ["server:mcp:home-assistant", "weather"],
     }
     assert "tools" not in payload
+
+
+async def test_complete_tool_lifecycle_returns_only_final_speech(hass) -> None:
+    """Tool structures and results never become Home Assistant speech."""
+    agent = OpenWebUIAgent(hass, _entry())
+    agent.query = AsyncMock(
+        return_value={
+            "done": True,
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "get_live_context",
+                    "arguments": '{"private":"argument"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "output": "private household state",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "There are three available devices.",
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+    chat_log = ChatLog(hass, "ha-conversation-id")
+    chat_log.async_add_user_content(UserContent(content="List the devices."))
+    user_input = conversation.ConversationInput(
+        text="List the devices.",
+        context=Context(),
+        conversation_id="ha-conversation-id",
+        device_id=None,
+        satellite_id=None,
+        language="en",
+        agent_id="conversation.openwebui_test",
+    )
+
+    result = await agent._async_handle_message(user_input, chat_log)
+
+    assert result.response.speech["plain"]["speech"] == (
+        "There are three available devices."
+    )
+    assert chat_log.content[-1].content == "There are three available devices."
+
+
+async def test_tool_request_uses_persistent_chat_as_native_loop_context(hass) -> None:
+    """A real chat context is reused instead of creating an ephemeral one."""
+    agent = OpenWebUIAgent(
+        hass,
+        _entry(
+            {
+                CONF_MODEL: "test-model",
+                CONF_PERSISTENT_CHAT_ENABLED: True,
+                CONF_SERVER_SIDE_TOOLS_ENABLED: True,
+                CONF_STREAMING_ENABLED: False,
+                CONF_TOOL_IDS: "server:mcp:home-assistant",
+            }
+        ),
+    )
+    agent.client.async_create_chat = AsyncMock(return_value="openwebui-chat-id")
+    agent.client.async_update_chat = AsyncMock(return_value={"id": "openwebui-chat-id"})
+    agent.client.async_generate = AsyncMock(
+        return_value={"choices": [{"message": {"content": "answer"}}]}
+    )
+    chat_log = ChatLog(hass, "ha-conversation-id")
+    chat_log.async_add_user_content(UserContent(content="current request"))
+
+    await agent.query("current request", chat_log, search=False)
+
+    payload = agent.client.async_generate.await_args.args[0]
+    assert payload["stream"] is True
+    assert payload["chat_id"] == "openwebui-chat-id"
+    assert not payload["chat_id"].startswith("local:")
+    UUID(payload["id"])
 
 
 async def test_persistent_chat_is_created_reused_and_completed(hass) -> None:
