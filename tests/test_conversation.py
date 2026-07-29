@@ -247,7 +247,6 @@ async def test_tool_request_uses_persistent_chat_as_native_loop_context(hass) ->
         ),
     )
     agent.client.async_create_chat = AsyncMock(return_value="openwebui-chat-id")
-    agent.client.async_update_chat = AsyncMock(return_value={"id": "openwebui-chat-id"})
     agent.client.async_generate = AsyncMock(
         return_value={"choices": [{"message": {"content": "answer"}}]}
     )
@@ -261,10 +260,15 @@ async def test_tool_request_uses_persistent_chat_as_native_loop_context(hass) ->
     assert payload["chat_id"] == "openwebui-chat-id"
     assert not payload["chat_id"].startswith("local:")
     UUID(payload["id"])
+    assert payload["user_message"]["content"] == "current request"
+    assert payload["user_message"]["childrenIds"] == [payload["id"]]
+    assert payload["parent_id"] is None
 
 
-async def test_persistent_chat_is_created_reused_and_completed(hass) -> None:
-    """One Open WebUI chat follows the Home Assistant conversation."""
+async def test_persistent_chat_reuses_native_history_without_overwriting_output(
+    hass,
+) -> None:
+    """Later turns preserve server-owned reasoning and tool output."""
     agent = OpenWebUIAgent(
         hass,
         _entry(
@@ -275,7 +279,6 @@ async def test_persistent_chat_is_created_reused_and_completed(hass) -> None:
         ),
     )
     agent.client.async_create_chat = AsyncMock(return_value="openwebui-chat-id")
-    agent.client.async_update_chat = AsyncMock(return_value={"id": "openwebui-chat-id"})
     agent.client.async_generate = AsyncMock(
         side_effect=[
             {"choices": [{"message": {"content": "first answer"}}]},
@@ -299,16 +302,51 @@ async def test_persistent_chat_is_created_reused_and_completed(hass) -> None:
     first_payload = agent.client.async_generate.await_args_list[0].args[0]
     assert first_payload["chat_id"] == "openwebui-chat-id"
     assert first_payload["id"] == response_message_id
+    assert (
+        first_payload["user_message"]
+        == created_messages[first_payload["user_message"]["id"]]
+    )
+    assert first_payload["parent_id"] is None
     assert "session_id" not in first_payload
 
-    first_completed_chat = agent.client.async_update_chat.await_args_list[0].args[1]
-    assert (
-        first_completed_chat["history"]["messages"][response_message_id]["content"]
-        == "first answer"
-    )
-    assert (
-        first_completed_chat["history"]["messages"][response_message_id]["done"] is True
-    )
+    server_chat = created_chat | {
+        "history": created_history
+        | {
+            "messages": created_messages
+            | {
+                response_message_id: created_messages[response_message_id]
+                | {
+                    "content": "first answer",
+                    "done": True,
+                    "output": [
+                        {
+                            "type": "reasoning",
+                            "status": "completed",
+                            "summary": "Checked the available tools.",
+                        },
+                        {
+                            "type": "function_call",
+                            "name": "get_weather",
+                            "arguments": '{"zip":"98155"}',
+                        },
+                        {
+                            "type": "function_call_output",
+                            "output": "Private weather result",
+                        },
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_text", "text": "first answer"}
+                            ],
+                        },
+                    ],
+                    "usage": {"total_tokens": 42},
+                }
+            }
+        }
+    }
+    agent.client.async_get_chat = AsyncMock(return_value=server_chat)
 
     chat_log.async_add_assistant_content_without_tools(
         AssistantContent(agent_id="conversation.openwebui_test", content="first answer")
@@ -317,15 +355,21 @@ async def test_persistent_chat_is_created_reused_and_completed(hass) -> None:
     await agent.query("second request", chat_log, search=False)
 
     agent.client.async_create_chat.assert_awaited_once()
-    assert agent.client.async_update_chat.await_count == 3
+    agent.client.async_get_chat.assert_awaited_once_with("openwebui-chat-id")
     second_payload = agent.client.async_generate.await_args_list[1].args[0]
     assert second_payload["chat_id"] == "openwebui-chat-id"
-    second_completed_chat = agent.client.async_update_chat.await_args_list[2].args[1]
-    second_current_id = second_completed_chat["history"]["currentId"]
+    assert second_payload["id"] != response_message_id
+    assert second_payload["parent_id"] == response_message_id
+    assert second_payload["user_message"]["parentId"] == response_message_id
+    assert second_payload["user_message"]["content"] == "second request"
+    assert second_payload["user_message"]["childrenIds"] == [second_payload["id"]]
     assert (
-        second_completed_chat["history"]["messages"][second_current_id]["content"]
-        == "second answer"
+        server_chat["history"]["messages"][response_message_id]["output"][1]["name"]
+        == "get_weather"
     )
+    assert server_chat["history"]["messages"][response_message_id]["usage"] == {
+        "total_tokens": 42
+    }
 
 
 async def test_persistent_chat_mapping_survives_agent_reload(hass) -> None:
@@ -333,9 +377,6 @@ async def test_persistent_chat_mapping_survives_agent_reload(hass) -> None:
     entry = _entry({CONF_PERSISTENT_CHAT_ENABLED: True})
     first_agent = OpenWebUIAgent(hass, entry)
     first_agent.client.async_create_chat = AsyncMock(return_value="stored-chat-id")
-    first_agent.client.async_update_chat = AsyncMock(
-        return_value={"id": "stored-chat-id"}
-    )
     first_agent.client.async_generate = AsyncMock(
         return_value={"choices": [{"message": {"content": "first answer"}}]}
     )
@@ -343,12 +384,12 @@ async def test_persistent_chat_mapping_survives_agent_reload(hass) -> None:
     chat_log.async_add_user_content(UserContent(content="first request"))
 
     await first_agent.query("first request", chat_log, search=False)
+    created_chat = first_agent.client.async_create_chat.await_args.args[0]
+    first_response_id = created_chat["history"]["currentId"]
 
     reloaded_agent = OpenWebUIAgent(hass, entry)
     reloaded_agent.client.async_create_chat = AsyncMock(return_value="new-chat-id")
-    reloaded_agent.client.async_update_chat = AsyncMock(
-        return_value={"id": "stored-chat-id"}
-    )
+    reloaded_agent.client.async_get_chat = AsyncMock(return_value=created_chat)
     reloaded_agent.client.async_generate = AsyncMock(
         return_value={"choices": [{"message": {"content": "second answer"}}]}
     )
@@ -358,13 +399,12 @@ async def test_persistent_chat_mapping_survives_agent_reload(hass) -> None:
     await reloaded_agent.query("second request", reloaded_log, search=False)
 
     reloaded_agent.client.async_create_chat.assert_not_awaited()
-    assert reloaded_agent.client.async_update_chat.await_args_list[0].args[0] == (
-        "stored-chat-id"
-    )
-    assert (
-        reloaded_agent.client.async_generate.await_args.args[0]["chat_id"]
-        == "stored-chat-id"
-    )
+    reloaded_agent.client.async_get_chat.assert_awaited_once_with("stored-chat-id")
+    payload = reloaded_agent.client.async_generate.await_args.args[0]
+    assert payload["chat_id"] == "stored-chat-id"
+    assert payload["parent_id"] == first_response_id
+    assert payload["id"] != first_response_id
+    assert payload["user_message"]["content"] == "second request"
 
 
 async def test_persistent_chat_failure_falls_back_to_stateless(hass) -> None:
@@ -376,7 +416,6 @@ async def test_persistent_chat_failure_falls_back_to_stateless(hass) -> None:
     agent.client.async_create_chat = AsyncMock(
         side_effect=ApiCommError("chat endpoint unavailable")
     )
-    agent.client.async_update_chat = AsyncMock()
     agent.client.async_generate = AsyncMock(
         return_value={"choices": [{"message": {"content": "answer"}}]}
     )
@@ -389,4 +428,3 @@ async def test_persistent_chat_failure_falls_back_to_stateless(hass) -> None:
     payload = agent.client.async_generate.await_args.args[0]
     assert "chat_id" not in payload
     assert "id" not in payload
-    agent.client.async_update_chat.assert_not_awaited()

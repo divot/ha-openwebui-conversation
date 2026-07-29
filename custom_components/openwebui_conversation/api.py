@@ -126,19 +126,16 @@ class OpenWebUIApiClient:
             raise ApiJsonError("Open WebUI returned a malformed new chat response")
         return response["id"]
 
-    async def async_update_chat(
-        self, chat_id: str, chat: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Replace the client-owned state of a persistent Open WebUI chat."""
+    async def async_get_chat(self, chat_id: str) -> dict[str, Any]:
+        """Return the client-owned state of a persistent Open WebUI chat."""
         response = await self._api_wrapper(
-            method="post",
+            method="get",
             url=f"{self._base_url}/api/v1/chats/{quote(chat_id, safe='')}",
-            data={"chat": chat},
             headers=self._auth_headers,
         )
-        if not isinstance(response, dict):
-            raise ApiJsonError("Open WebUI returned a malformed updated chat response")
-        return response
+        if not isinstance(response, dict) or not isinstance(response.get("chat"), dict):
+            raise ApiJsonError("Open WebUI returned a malformed chat response")
+        return response["chat"]
 
     async def async_generate(
         self,

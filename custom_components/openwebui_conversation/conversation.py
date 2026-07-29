@@ -277,8 +277,7 @@ class OpenWebUIAgent(
         conversation_id: str,
         current_prompt: str,
         model: str,
-        response_text: str | None = None,
-    ) -> tuple[dict[str, Any], str]:
+    ) -> tuple[dict[str, Any], str, dict[str, Any]]:
         """Build Open WebUI's persistent, tree-shaped chat representation."""
         messages = self._all_messages_from_chat_log(chat_log, current_prompt)
         now = int(time.time())
@@ -312,16 +311,18 @@ class OpenWebUIAgent(
             "parentId": previous_id,
             "childrenIds": [],
             "role": "assistant",
-            "content": response_text or "",
+            "content": "",
             "model": model,
             "modelName": model,
             "modelIdx": 0,
             "timestamp": now,
-            "done": response_text is not None,
+            "done": False,
         }
         history_messages[response_id] = response_message
         if previous_id is not None:
             history_messages[previous_id]["childrenIds"].append(response_id)
+        assert previous_id is not None
+        current_user_message = history_messages[previous_id]
 
         return (
             {
@@ -337,7 +338,36 @@ class OpenWebUIAgent(
                 "timestamp": int(time.time() * 1000),
             },
             response_id,
+            current_user_message,
         )
+
+    @staticmethod
+    def _build_persistent_follow_up(
+        chat: dict[str, Any], current_prompt: str
+    ) -> tuple[str, dict[str, Any]]:
+        """Build one new turn using the server-owned chat as its parent."""
+        history = chat.get("history")
+        history = history if isinstance(history, dict) else {}
+        history_messages = history.get("messages")
+        history_messages = (
+            history_messages if isinstance(history_messages, dict) else {}
+        )
+        current_id = history.get("currentId")
+        parent_id = (
+            current_id
+            if isinstance(current_id, str) and current_id in history_messages
+            else None
+        )
+        response_id = str(uuid4())
+        user_message = {
+            "id": str(uuid4()),
+            "parentId": parent_id,
+            "childrenIds": [response_id],
+            "role": "user",
+            "content": current_prompt,
+            "timestamp": int(time.time()),
+        }
+        return response_id, user_message
 
     async def _async_load_persistent_chat_ids(self) -> None:
         """Load the Home Assistant to Open WebUI chat ID mapping once."""
@@ -363,24 +393,38 @@ class OpenWebUIAgent(
         )
 
     async def _async_prepare_persistent_chat(
-        self, conversation_id: str, chat: dict[str, Any]
-    ) -> str | None:
-        """Create or update the native chat before sending a completion."""
+        self,
+        *,
+        conversation_id: str,
+        chat_log: ChatLog,
+        current_prompt: str,
+        model: str,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        """Prepare native Open WebUI message metadata for one completion."""
         async with self._persistent_chat_lock:
             await self._async_load_persistent_chat_ids()
             assert self._persistent_chat_ids is not None
 
             if chat_id := self._persistent_chat_ids.get(conversation_id):
                 try:
-                    await self.client.async_update_chat(chat_id, chat)
-                    return chat_id
+                    chat = await self.client.async_get_chat(chat_id)
+                    response_id, user_message = self._build_persistent_follow_up(
+                        chat, current_prompt
+                    )
+                    return chat_id, response_id, user_message
                 except ApiClientError as err:
                     LOGGER.warning(
-                        "Unable to update persistent Open WebUI chat; "
+                        "Unable to load persistent Open WebUI chat; "
                         "attempting to create a replacement: %s",
                         err,
                     )
 
+            chat, response_id, user_message = self._build_persistent_chat(
+                chat_log=chat_log,
+                conversation_id=conversation_id,
+                current_prompt=current_prompt,
+                model=model,
+            )
             try:
                 chat_id = await self.client.async_create_chat(chat)
             except ApiClientError as err:
@@ -389,7 +433,7 @@ class OpenWebUIAgent(
                     "continuing with a stateless completion: %s",
                     err,
                 )
-                return None
+                return None, None, None
 
             self._persistent_chat_ids[conversation_id] = chat_id
             try:
@@ -398,16 +442,7 @@ class OpenWebUIAgent(
                 LOGGER.warning(
                     "Unable to save the persistent Open WebUI chat mapping: %s", err
                 )
-            return chat_id
-
-    async def _async_finish_persistent_chat(
-        self, chat_id: str, chat: dict[str, Any]
-    ) -> None:
-        """Store the completed assistant message without masking its response."""
-        try:
-            await self.client.async_update_chat(chat_id, chat)
-        except ApiClientError as err:
-            LOGGER.warning("Unable to finalize persistent Open WebUI chat: %s", err)
+            return chat_id, response_id, user_message
 
     async def query(
         self, prompt: str, chat_log: ChatLog, search: bool
@@ -445,16 +480,18 @@ class OpenWebUIAgent(
         chat_id: str | None = None
         message_id: str | None = None
         persistent_chat_id: str | None = None
+        persistent_user_message: dict[str, Any] | None = None
 
         if persistent_chat_enabled and conversation_id:
-            draft_chat, message_id = self._build_persistent_chat(
-                chat_log=chat_log,
+            (
+                persistent_chat_id,
+                message_id,
+                persistent_user_message,
+            ) = await self._async_prepare_persistent_chat(
                 conversation_id=conversation_id,
+                chat_log=chat_log,
                 current_prompt=prompt,
                 model=model,
-            )
-            persistent_chat_id = await self._async_prepare_persistent_chat(
-                conversation_id, draft_chat
             )
             chat_id = persistent_chat_id
         elif persistent_chat_enabled:
@@ -482,6 +519,12 @@ class OpenWebUIAgent(
             web_search_mode=web_search_mode,
             chat_id=chat_id,
             message_id=message_id,
+            parent_id=(
+                persistent_user_message.get("parentId")
+                if persistent_user_message is not None
+                else None
+            ),
+            user_message=persistent_user_message,
         )
 
         LOGGER.debug(
@@ -496,16 +539,6 @@ class OpenWebUIAgent(
             bool(persistent_chat_id),
         )
         response = await self.client.async_generate(payload)
-
-        if persistent_chat_id and conversation_id:
-            completed_chat, _ = self._build_persistent_chat(
-                chat_log=chat_log,
-                conversation_id=conversation_id,
-                current_prompt=prompt,
-                model=model,
-                response_text=extract_assistant_text(response),
-            )
-            await self._async_finish_persistent_chat(persistent_chat_id, completed_chat)
 
         return response
 

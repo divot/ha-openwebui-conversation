@@ -89,9 +89,7 @@ def test_function_calling_mode_is_explicit_only_when_requested() -> None:
 
 def test_web_search_mode_is_scoped_to_enabled_search() -> None:
     """The server can distinguish trigger and agentic search without changing tools."""
-    assert _payload(web_search_mode="native")["features"] == {
-        "web_search": False
-    }
+    assert _payload(web_search_mode="native")["features"] == {"web_search": False}
     assert _payload(
         web_search=True,
         web_search_mode="native",
@@ -107,12 +105,24 @@ def test_streaming_selection() -> None:
 
 
 def test_persistent_chat_metadata() -> None:
-    """Native chat identifiers are included only when a chat is selected."""
+    """Native message metadata is included only when a chat is selected."""
+    user_message = {
+        "id": "user-message-id",
+        "parentId": "previous-assistant-id",
+        "childrenIds": ["assistant-message-id"],
+        "role": "user",
+        "content": "Hello",
+    }
     payload = _payload(
         chat_id="chat-id",
         message_id="assistant-message-id",
+        parent_id="previous-assistant-id",
+        user_message=user_message,
     )
     assert payload["chat_id"] == "chat-id"
     assert payload["id"] == "assistant-message-id"
+    assert payload["parent_id"] == "previous-assistant-id"
+    assert payload["user_message"] == user_message
 
     assert "id" not in _payload(message_id="orphan-message-id")
+    assert "user_message" not in _payload(user_message=user_message)

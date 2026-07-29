@@ -93,11 +93,14 @@ enabled in Open WebUI, allow the `/api/v1/chats` endpoints in addition to
 `/api/models`, `/api/v1/tools/`, and `/api/chat/completions`.
 
 Persistent completions include Open WebUI's `chat_id` and assistant message
-`id`. They deliberately omit `session_id`: that field selects Open WebUI's
-WebSocket/background-task response path, while this integration needs the final
-answer returned directly over HTTP. Open WebUI must include the direct-response
-fix that returns the streaming handler's final `data` payload; affected stock
-v0.10.2 builds instead return JSON `null`.
+`id`, plus the parent and user-message metadata used by Open WebUI's own browser.
+This lets Open WebUI persist structured reasoning, tool calls, tool results, and
+usage data on the assistant message without a later Home Assistant history sync
+overwriting them. They deliberately omit `session_id`: that field selects Open
+WebUI's WebSocket/background-task response path, while this integration needs
+the final answer returned directly over HTTP. Open WebUI must include the
+direct-response fix that returns the streaming handler's final `data` payload;
+affected stock v0.10.2 builds instead return JSON `null`.
 
 #### Model Configuration
 The language model you want to use.

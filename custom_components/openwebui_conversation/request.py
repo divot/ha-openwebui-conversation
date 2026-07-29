@@ -35,6 +35,8 @@ def build_chat_completion_payload(
     web_search_mode: str | None = None,
     chat_id: str | None = None,
     message_id: str | None = None,
+    parent_id: str | None = None,
+    user_message: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a payload for ``POST /api/chat/completions``.
 
@@ -64,5 +66,11 @@ def build_chat_completion_payload(
         payload["chat_id"] = chat_id
         if message_id:
             payload["id"] = message_id
+        if user_message is not None:
+            # Match Open WebUI's browser request contract. This lets the
+            # completion endpoint own message persistence, including structured
+            # reasoning and tool output on the assistant message.
+            payload["parent_id"] = parent_id
+            payload["user_message"] = dict(user_message)
 
     return payload

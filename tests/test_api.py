@@ -148,15 +148,24 @@ async def test_malformed_persistent_chat_response_is_rejected() -> None:
         ).async_create_chat({})
 
 
-async def test_update_persistent_chat_escapes_id() -> None:
-    """The chat ID cannot alter the update endpoint path."""
-    session = FakeSession(FakeResponse(json_data={"id": "chat-id", "chat": {}}))
-    chat = {"title": "Updated"}
+async def test_get_persistent_chat_escapes_id() -> None:
+    """The chat ID cannot alter the read endpoint path."""
+    chat = {"title": "Home Assistant", "history": {"messages": {}}}
+    session = FakeSession(FakeResponse(json_data={"id": "chat-id", "chat": chat}))
 
-    await _client(session).async_update_chat("chat/id", chat)
+    result = await _client(session).async_get_chat("chat/id")
 
     assert session.request_kwargs["url"].endswith("/api/v1/chats/chat%2Fid")
-    assert session.request_kwargs["json"] == {"chat": chat}
+    assert session.request_kwargs["method"] == "get"
+    assert result == chat
+
+
+async def test_malformed_persistent_chat_read_is_rejected() -> None:
+    """A chat read response must contain the client-owned chat object."""
+    with pytest.raises(ApiJsonError, match="malformed chat response"):
+        await _client(
+            FakeSession(FakeResponse(json_data={"id": "chat-id"}))
+        ).async_get_chat("chat-id")
 
 
 async def test_auth_error_redacts_credentials() -> None:
