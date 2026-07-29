@@ -70,25 +70,69 @@ OpenAPI server IDs use `server:<server-id>`; native MCP server IDs use
 returned by Open WebUI. The integration deliberately validates only that IDs
 are nonblank because not all valid IDs have an MCP prefix.
 
-Web search plus MCP in one turn:
+Sentence-trigger search plus MCP in one turn:
 
 ```json
 {
   "model": "<model-id>",
   "messages": [{"role": "user", "content": "Use search and the home tool."}],
-  "stream": false,
-  "features": {"web_search": true},
+  "stream": true,
+  "features": {
+    "web_search": true,
+    "web_search_mode": "trigger"
+  },
   "tool_ids": ["server:mcp:home-assistant"]
+}
+```
+
+Native, model-decided search:
+
+```json
+{
+  "model": "<model-id>",
+  "messages": [{"role": "user", "content": "What should I wear today?"}],
+  "stream": true,
+  "features": {
+    "web_search": true,
+    "web_search_mode": "native"
+  },
+  "params": {"function_calling": "native"},
+  "chat_id": "local:<uuid>",
+  "id": "<assistant-message-uuid>"
 }
 ```
 
 Built-in web search is a feature/capability, not a generic `tool_id`. Browser
 requests with a WebSocket `session_id` can use the native agentic
-`search_web` tool. Direct API callers do not receive hidden builtin tools, even
-when they explicitly send `features.web_search: true`; Open WebUI must route
-that explicit direct request through its synchronous RAG preprocessing path.
-The companion Open WebUI patch does so for sessionless callers while preserving
-native search for browser sessions.
+`search_web` and `fetch_url` tools. This integration cannot send a browser
+session ID because doing so selects Open WebUI's asynchronous task response
+instead of returning the final answer over HTTP.
+
+The current companion Open WebUI direct-search patch is enough only for
+sentence-trigger mode. Its `should_force_web_search` helper returns true for
+every request without `session_id`, so setting `features.web_search: true` on
+every native-mode turn forces a search before the model runs. In addition,
+`process_chat_payload` currently gates built-in tool injection on
+`metadata.session_id`, so removing the forced search alone gives the model no
+search tool.
+
+For sessionless native mode, Open WebUI must instead:
+
+1. keep synchronous RAG search for `features.web_search_mode: trigger` (and for
+   legacy requests that omit the integration-specific mode);
+2. skip forced RAG for a streaming
+   `features.web_search_mode: native` request that also explicitly selects
+   native function calling and supplies chat/message context;
+3. inject the permission- and capability-checked `search_web` and `fetch_url`
+   builtins for that request without requiring `session_id`; and
+4. run the existing streaming tool loop and return its final `data` payload
+   synchronously.
+
+The sessionless exception should expose only the explicitly requested search
+builtins. It should not use a fake `session_id` or silently enable unrelated
+built-in tools. The integration supplies the same ephemeral `local:` chat and
+assistant message IDs already used for server-side native `tool_ids`, so the
+event emitter and final-response loop have the required context.
 
 Both paths still require global search configuration, the API user's web-search
 permission, and selected-model support/configuration. A true request flag
@@ -216,6 +260,7 @@ built, emitted, and persisted by `streaming_chat_response_handler`'s
 background-task/WebSocket path. The integration therefore:
 
 - forces `stream: true` whenever configured native server tools are active;
+- also forces `stream: true` for Native function calling search mode;
 - uses the real persistent chat/message IDs when available;
 - otherwise supplies an ephemeral `local:` chat ID and UUID message ID, which
   creates event-emitter context without a stored chat or WebSocket session;
@@ -293,9 +338,12 @@ streaming terminates, and that both search and MCP can run in one request.
    Workspace IDs are passed as returned.
 5. **Does incoming `tools` supersede IDs?** Yes. Its presence selects the
    caller-owned tool path and suppresses server-side `tool_ids` resolution.
-6. **Web search?** Send `features.web_search: true`; also configure global
-   search, user permission, model capability/settings, and compatible function
-   calling. It is not an MCP/Workspace tool ID.
+6. **Web search?** Send `features.web_search: true`. Use
+   `features.web_search_mode: trigger` for deterministic preprocessing or
+   `features.web_search_mode: native` plus native function calling, streaming,
+   and chat/message context for model-decided search. Also configure global
+   search, user permission, model capability/settings, and compatible server
+   handling. It is not an MCP/Workspace tool ID.
 7. **Are model-attached tools automatic?** Not reliably for direct API calls;
    send explicit IDs.
 8. **Discovery?** The multiselect is populated with permission-filtered metadata

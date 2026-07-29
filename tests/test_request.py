@@ -76,6 +76,31 @@ def test_tools_and_web_search_coexist_without_caller_tools() -> None:
     assert "tools" not in payload
 
 
+def test_function_calling_mode_is_explicit_only_when_requested() -> None:
+    """Search modes can select native or legacy handling without a tools field."""
+    assert "params" not in _payload()
+    assert _payload(function_calling="native")["params"] == {
+        "function_calling": "native"
+    }
+    assert _payload(function_calling="legacy")["params"] == {
+        "function_calling": "legacy"
+    }
+
+
+def test_web_search_mode_is_scoped_to_enabled_search() -> None:
+    """The server can distinguish trigger and agentic search without changing tools."""
+    assert _payload(web_search_mode="native")["features"] == {
+        "web_search": False
+    }
+    assert _payload(
+        web_search=True,
+        web_search_mode="native",
+    )["features"] == {
+        "web_search": True,
+        "web_search_mode": "native",
+    }
+
+
 def test_streaming_selection() -> None:
     """Streaming selection maps directly to the Open WebUI request."""
     assert _payload(stream=True)["stream"] is True

@@ -32,7 +32,6 @@ from .const import (
     CONF_MAX_HISTORY,
     CONF_MODEL,
     CONF_PERSISTENT_CHAT_ENABLED,
-    CONF_SEARCH_ENABLED,
     CONF_SEARCH_RESULT_PREFIX,
     CONF_SEARCH_SENTENCES,
     CONF_SERVER_SIDE_TOOLS_ENABLED,
@@ -45,7 +44,6 @@ from .const import (
     DEFAULT_MAX_HISTORY,
     DEFAULT_MODEL,
     DEFAULT_PERSISTENT_CHAT_ENABLED,
-    DEFAULT_SEARCH_ENABLED,
     DEFAULT_SEARCH_RESULT_PREFIX,
     DEFAULT_SEARCH_SENTENCES,
     DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
@@ -57,10 +55,13 @@ from .const import (
     DO_SEARCH_INTENT,
     DOMAIN,
     LOGGER,
+    SEARCH_MODE_NATIVE,
+    SEARCH_MODE_TRIGGER,
 )
 from .exceptions import ApiClientError
 from .request import build_chat_completion_payload, normalize_tool_ids
 from .response import extract_assistant_text
+from .search import search_mode_from_options
 
 _CHAT_ID_STORAGE_VERSION = 1
 
@@ -93,9 +94,7 @@ class OpenWebUIAgent(
             session=async_get_clientsession(hass),
             verify_ssl=entry.options.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL),
         )
-        self.search_enabled = entry.options.get(
-            CONF_SEARCH_ENABLED, DEFAULT_SEARCH_ENABLED
-        )
+        self.search_mode = search_mode_from_options(entry.options)
         self.search_sentences = [
             sentence.strip()
             for sentence in entry.options.get(
@@ -148,7 +147,7 @@ class OpenWebUIAgent(
 
     def _match_search_trigger(self, prompt: str) -> tuple[str, bool]:
         """Return a rewritten search query when a configured sentence matches."""
-        if not self.search_enabled or not self.search_sentences:
+        if self.search_mode != SEARCH_MODE_TRIGGER or not self.search_sentences:
             return prompt, False
 
         intents = Intents.from_dict(
@@ -425,11 +424,19 @@ class OpenWebUIAgent(
             CONF_STREAMING_ENABLED, DEFAULT_STREAMING_ENABLED
         )
         tools_active = tools_enabled and bool(tool_ids)
+        native_search_active = self.search_mode == SEARCH_MODE_NATIVE
         # Open WebUI's native server-side tool loop is implemented by its
         # streaming response handler. Keep the user option for ordinary
         # conversations, but never send a native tool request in the
         # non-streaming mode that returns only the first tool-call turn.
-        stream = configured_stream or tools_active
+        tool_loop_active = tools_active or native_search_active
+        stream = configured_stream or tool_loop_active
+        web_search = search or native_search_active
+        web_search_mode: str | None = None
+        if native_search_active:
+            web_search_mode = SEARCH_MODE_NATIVE
+        elif search:
+            web_search_mode = SEARCH_MODE_TRIGGER
         messages = self._messages_from_chat_log(chat_log, prompt)
         persistent_chat_enabled = self.entry.options.get(
             CONF_PERSISTENT_CHAT_ENABLED, DEFAULT_PERSISTENT_CHAT_ENABLED
@@ -456,7 +463,7 @@ class OpenWebUIAgent(
                 "Home Assistant conversation ID"
             )
 
-        if tools_active and not chat_id:
+        if tool_loop_active and not chat_id:
             # Open WebUI only enters its native server-tool loop when both
             # chat_id and message id are present. A local chat provides the
             # required event-emitter context without creating a sidebar chat
@@ -468,20 +475,23 @@ class OpenWebUIAgent(
             model=model,
             messages=messages,
             stream=stream,
-            web_search=search,
+            web_search=web_search,
             server_side_tools_enabled=tools_enabled,
             tool_ids=tool_ids,
+            function_calling="native" if native_search_active else None,
+            web_search_mode=web_search_mode,
             chat_id=chat_id,
             message_id=message_id,
         )
 
         LOGGER.debug(
             "Sending Open WebUI request (model=%s, messages=%d, tool_ids=%s, "
-            "web_search=%s, stream=%s, persistent_chat=%s)",
+            "web_search=%s, web_search_mode=%s, stream=%s, persistent_chat=%s)",
             model,
             len(messages),
             tool_ids if tools_enabled else [],
-            search,
+            web_search,
+            web_search_mode,
             stream,
             bool(persistent_chat_id),
         )

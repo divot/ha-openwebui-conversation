@@ -18,10 +18,14 @@ from custom_components.openwebui_conversation.const import (
     CONF_MAX_HISTORY,
     CONF_MODEL,
     CONF_PERSISTENT_CHAT_ENABLED,
+    CONF_SEARCH_ENABLED,
+    CONF_SEARCH_MODE,
     CONF_SERVER_SIDE_TOOLS_ENABLED,
     CONF_STREAMING_ENABLED,
     CONF_TOOL_IDS,
     DOMAIN,
+    SEARCH_MODE_NATIVE,
+    SEARCH_MODE_TRIGGER,
 )
 from custom_components.openwebui_conversation.conversation import OpenWebUIAgent
 from custom_components.openwebui_conversation.exceptions import ApiCommError
@@ -94,10 +98,89 @@ async def test_query_maps_options_to_one_request(hass) -> None:
         "model": "test-model",
         "messages": [{"role": "user", "content": "current request"}],
         "stream": True,
-        "features": {"web_search": True},
+        "features": {
+            "web_search": True,
+            "web_search_mode": SEARCH_MODE_TRIGGER,
+        },
         "tool_ids": ["server:mcp:home-assistant", "weather"],
     }
     assert "tools" not in payload
+
+
+async def test_legacy_search_enabled_option_selects_trigger_mode(hass) -> None:
+    """Existing entries retain sentence-trigger search after the mode upgrade."""
+    agent = OpenWebUIAgent(hass, _entry({CONF_SEARCH_ENABLED: True}))
+
+    assert agent.search_mode == SEARCH_MODE_TRIGGER
+    assert agent._match_search_trigger("search the web for weather") == (
+        "weather",
+        True,
+    )
+
+
+async def test_native_search_ignores_triggers_and_builds_native_tool_request(
+    hass,
+) -> None:
+    """Native mode leaves the prompt intact and supplies server tool-loop context."""
+    agent = OpenWebUIAgent(
+        hass,
+        _entry(
+            {
+                CONF_MODEL: "test-model",
+                CONF_SEARCH_MODE: SEARCH_MODE_NATIVE,
+                CONF_STREAMING_ENABLED: False,
+            }
+        ),
+    )
+    agent.client.async_generate = AsyncMock(
+        return_value={"choices": [{"message": {"content": "answer"}}]}
+    )
+    chat_log = ChatLog(hass, "conversation-id")
+    prompt = "search the web for local news"
+    chat_log.async_add_user_content(UserContent(content=prompt))
+
+    assert agent._match_search_trigger(prompt) == (prompt, False)
+    await agent.query(prompt, chat_log, search=False)
+
+    payload = agent.client.async_generate.await_args.args[0]
+    assert payload["messages"] == [{"role": "user", "content": prompt}]
+    assert payload["features"] == {
+        "web_search": True,
+        "web_search_mode": SEARCH_MODE_NATIVE,
+    }
+    assert payload["params"] == {"function_calling": "native"}
+    assert payload["stream"] is True
+    assert payload["chat_id"].startswith("local:")
+    UUID(payload["id"])
+    assert "tools" not in payload
+
+
+async def test_native_search_does_not_add_trigger_result_prefix(hass) -> None:
+    """The integration cannot claim a search occurred when the model chose not to."""
+    agent = OpenWebUIAgent(
+        hass,
+        _entry({CONF_SEARCH_MODE: SEARCH_MODE_NATIVE}),
+    )
+    agent.query = AsyncMock(
+        return_value={"choices": [{"message": {"content": "No search needed."}}]}
+    )
+    chat_log = ChatLog(hass, "ha-conversation-id")
+    prompt = "search the web for local news"
+    chat_log.async_add_user_content(UserContent(content=prompt))
+    user_input = conversation.ConversationInput(
+        text=prompt,
+        context=Context(),
+        conversation_id="ha-conversation-id",
+        device_id=None,
+        satellite_id=None,
+        language="en",
+        agent_id="conversation.openwebui_test",
+    )
+
+    result = await agent._async_handle_message(user_input, chat_log)
+
+    agent.query.assert_awaited_once_with(prompt, chat_log, False)
+    assert result.response.speech["plain"]["speech"] == "No search needed."
 
 
 async def test_complete_tool_lifecycle_returns_only_final_speech(hass) -> None:

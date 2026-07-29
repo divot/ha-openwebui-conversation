@@ -42,6 +42,49 @@ supplies an ephemeral `local:` chat/message context when persistent sidebar
 chats are disabled. This activates the server-side loop without creating a
 stored chat or requiring a WebSocket session.
 
+## Open WebUI sessionless native-search support
+
+The integration now distinguishes deterministic trigger search from
+model-decided search inside the existing `features` object:
+
+```json
+{
+  "features": {
+    "web_search": true,
+    "web_search_mode": "native"
+  },
+  "params": {
+    "function_calling": "native"
+  },
+  "stream": true,
+  "chat_id": "local:<uuid>",
+  "id": "<assistant-message-uuid>"
+}
+```
+
+The current direct-search patch is not sufficient for this mode.
+`should_force_web_search` forces all requests without `session_id` through RAG,
+while `use_builtin_tools` requires `session_id`. A fake session is not a safe
+workaround: it selects the background-task API response and can create an event
+caller for a browser session that does not exist.
+
+The narrow server change should:
+
+1. treat `features.web_search_mode: trigger` and omitted mode as the existing
+   synchronous-RAG path;
+2. recognize native mode only when `features.web_search` is true,
+   `params.function_calling` is native, `stream` is true, and chat plus assistant
+   message IDs are present;
+3. allow only `search_web` and `fetch_url` through the existing global-config,
+   user-permission, model-capability, and `builtinTools.web_search` gates for
+   that sessionless request; and
+4. reuse the direct streaming response fix so the completed tool-loop `data`
+   object is returned over HTTP.
+
+This preserves the browser path, the deterministic trigger path, and the
+least-privilege rule that direct API callers do not receive unrelated hidden
+builtins.
+
 This is the historical proposal for the server-side tools work. Persistent
 Open WebUI chats were subsequently added as a separate, disabled-by-default
 General Settings option, and the manual tool-ID field was subsequently replaced

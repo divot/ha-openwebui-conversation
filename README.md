@@ -24,7 +24,10 @@ flowchart TD
 
 Home Assistant's **Prefer handling commands locally** option is still useful when you want deterministic built-in Assist intents to run before a request falls back to Open WebUI.
 
-This conversation agent can search the internet for you, using sentence triggers you can configure, if Web Search is set up in OpenWebUI. For more details, see the relevant Options section below.
+This conversation agent can search the internet through Open WebUI. Search can
+be disabled, activated by configurable sentence triggers, or exposed as a
+native function so the model decides when it is needed. For more details, see
+the relevant Options section below.
 
 You should also take advantage of OpenWebUI's ability to "clone" models; once you create a clone model in OpenWebUI, it will automatically be available to select in the integration's options. Using this integration with base models is not recommended and can cause issues (see the issue [here](https://github.com/TheRealPSV/ha-openwebui-conversation/issues/40)).
 
@@ -134,24 +137,41 @@ do not expose all desired entries through discovery. IDs are not restricted to
 MCP.
 
 #### Search Configuration
-Options related to performing a web search with OpenWebUI. The agent will perform a web search through OpenWebUI and have the model summarize the results.
+Options related to performing a web search with Open WebUI.
 
 | Option                        | Description                                                                                                                                                                                                                                                                           |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Search Enabled                | Whether or not the conversation agent should perform web searches when the given sentences are triggered.                                                                                                                                                                             |
-| Search Trigger Sentences      | Sentence triggers that tell the conversation agent to search the web for something. One sentence per line. These sentences use the same syntax as Home Assistant's standard trigger sentences, but must contain `{query}` once in each sentence. Some default sentences are provided. |
-| Search Results Message Prefix | Text prepended to the search response that indicates a search was performed. A default prefix is provided.                                                                                                                                                                            |
+| Search Mode                   | **Disabled**, **Sentence triggers**, or **Native function calling**. Native mode makes search available on every turn and lets the model decide whether to call it. |
+| Search Trigger Sentences      | Used only in Sentence triggers mode. One sentence per line, using Home Assistant's trigger-sentence syntax and exactly one `{query}` wildcard. |
+| Search Results Message Prefix | Used only in Sentence triggers mode, where the integration knows that search was requested. Native mode adds no prefix because the model may choose not to search. |
 
 To enable web search in OpenWebUI, see [OpenWebUI's documentation on Web Search][openwebui-search].
 
-The integration sends `features.web_search: true` only when a configured search sentence matches. Built-in agentic search also requires web search to be globally configured, allowed for the API-key user, and enabled as a capability for the selected model. Web search is not represented as an MCP `tool_id`.
+Sentence-trigger mode preserves the deterministic behavior of existing entries:
+after a sentence matches, the integration extracts `{query}`, sends
+`features.web_search: true` with `features.web_search_mode: trigger`, and adds
+the configured prefix to the answer. It does not override the model's general
+function-calling setting or the behavior of other server-side tools.
+
+Native mode leaves the user's prompt intact and sends
+`features.web_search: true`, `features.web_search_mode: native`, and
+`params.function_calling: native` on every turn. It also enables buffered
+streaming and supplies a chat/message context, allowing Open WebUI's native
+tool loop to return only its final answer. Web search is a built-in feature,
+not an MCP or Workspace `tool_id`.
 
 Open WebUI browser requests carry a WebSocket `session_id` and can receive the
 native `search_web` builtin. API callers such as this integration do not have
-that browser session. Native-function-calling deployments therefore need an
-Open WebUI build that routes an explicit sessionless
-`features.web_search: true` request through the synchronous web-search/RAG
-handler; otherwise the model receives neither search results nor a search tool.
+that browser session. Native mode therefore requires an Open WebUI build that
+allows an explicit, sessionless native search request with chat/message context
+to receive the server-side `search_web` and `fetch_url` builtins.
+
+The companion direct-search fallback that forces every sessionless
+`features.web_search: true` request through synchronous RAG is sufficient for
+Sentence triggers mode, but not for Native function calling: it searches every
+turn instead of letting the model decide. See the
+[API contract investigation](docs/api-contract.md) for the required server
+behavior.
 
 ## Home Assistant MCP setup
 
@@ -183,15 +203,22 @@ The integration does not log request transcripts, full payloads, response/error 
 | `consumed the stream without returning its final response` | The Open WebUI direct native-tool path completed through its event emitter but returned JSON `null`. Apply or upgrade to an Open WebUI build that returns the streaming handler's final `data` payload. |
 | Home Assistant MCP connects but cannot control an entity | Expose the entity to Assist and verify that the selected MCP endpoint/API provides the required intent. |
 | Tool claims success but nothing changed | Inspect Open WebUI's tool result and Home Assistant logs. Do not assume a model's natural-language claim proves an action succeeded. |
-| Web search does not run | Configure a search provider globally, allow web search for the API user, enable the model capability, and use one of the configured trigger sentences. |
-| Native web search claims it has no access | Confirm the Open WebUI build handles sessionless `features.web_search: true` requests. Browser-only native builtin injection requires a WebSocket `session_id`; direct API requests need the synchronous search fallback. |
+| Sentence-trigger search does not run | Configure a search provider globally, allow web search for the API user, enable the model capability, select Sentence triggers mode, and use one of the configured sentences. |
+| Native mode searches every turn | The Open WebUI build is forcing sessionless search through synchronous RAG. It must inject the native search builtins for explicit sessionless native requests instead. |
+| Native mode claims it has no search access | Confirm that Open WebUI allows sessionless native search with chat/message context and that global configuration, user permission, model capability, and builtin-tool settings all allow web search. |
 | Chats do not appear in Open WebUI | Enable **Show Conversations in Open WebUI** and allow the API key to create and update `/api/v1/chats` records. Chat persistence failures are logged while the conversation falls back to a stateless completion. |
 | TLS failure | Use a certificate trusted by the caller, or explicitly disable verification only on a trusted private network. |
 | Timeout or interrupted stream | Increase API Timeout, check Open WebUI's tool/MCP timeouts, and disable buffered streaming while diagnosing. |
 
 ## Migration from v1.3.x
 
-No config-entry migration is required. Existing entries keep their prior non-tool, non-streaming, stateless behavior because every new option has a backward-compatible default. Conversation history now comes exclusively from Home Assistant's `ChatLog`; the integration no longer maintains a second in-memory history. The API key is validated against the authenticated model-list endpoint during new setup.
+No config-entry migration is required. Existing `search_enabled: true` entries
+are interpreted as Sentence triggers mode, while disabled or unset entries
+remain Disabled. Saving Search Configuration replaces the legacy boolean with
+the explicit mode. Other new options retain backward-compatible defaults.
+Conversation history now comes exclusively from Home Assistant's `ChatLog`; the
+integration no longer maintains a second in-memory history. The API key is
+validated against the authenticated model-list endpoint during new setup.
 
 ## Known limitations
 
@@ -199,6 +226,7 @@ No config-entry migration is required. Existing entries keep their prior non-too
 * An Open WebUI chat that was deleted or became inaccessible is replaced on the next turn when the API key still has chat-creation access.
 * Buffered SSE is transport support, not progressive Home Assistant speech. It intentionally withholds intermediate tool calls, status JSON, and reasoning.
 * Native server-side tools require Open WebUI's streaming handler and a build that returns its final payload to synchronous direct API callers. Stock v0.10.2 returns JSON `null` after successfully completing event-emitter-backed streams.
+* Native search additionally requires Open WebUI to expose its built-in search tools to an explicit sessionless native request. A server that always converts sessionless web search to synchronous RAG cannot delegate the decision to the model.
 * Tool discovery reflects the configured API user's current Open WebUI access. Unavailable saved IDs remain visible until removed.
 * Reauthentication and config-entry reconfiguration are follow-up work; replace an entry to change its base URL or API key.
 * A model that cannot reliably produce tool calls may ignore tools or return a tool error. Open WebUI/model configuration, not this integration, owns that capability.

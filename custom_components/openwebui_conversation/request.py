@@ -31,6 +31,8 @@ def build_chat_completion_payload(
     web_search: bool,
     server_side_tools_enabled: bool,
     tool_ids: str | Iterable[str] | None,
+    function_calling: str | None = None,
+    web_search_mode: str | None = None,
     chat_id: str | None = None,
     message_id: str | None = None,
 ) -> dict[str, Any]:
@@ -48,6 +50,12 @@ def build_chat_completion_payload(
         # Preserve the integration's pre-existing web-search request contract.
         "features": {"web_search": web_search},
     }
+
+    if web_search and web_search_mode:
+        payload["features"]["web_search_mode"] = web_search_mode
+
+    if function_calling:
+        payload["params"] = {"function_calling": function_calling}
 
     if server_side_tools_enabled and (normalized_ids := normalize_tool_ids(tool_ids)):
         payload["tool_ids"] = normalized_ids

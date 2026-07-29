@@ -57,9 +57,14 @@
             "search_config": {
                 "title": "Search Configuration",
                 "data": {
-                    "search_enabled": "Search Enabled",
+                    "search_mode": "Search Mode",
                     "search_sentences": "Search Trigger Sentences",
                     "search_result_prefix": "Search Results Message Prefix"
+                },
+                "data_description": {
+                    "search_mode": "Sentence triggers search only after a configured phrase matches. Native function calling makes web search available on every turn and lets the model decide whether to call it.",
+                    "search_sentences": "Used only in Sentence triggers mode. Native function calling ignores these sentences.",
+                    "search_result_prefix": "Used only in Sentence triggers mode. Native function calling does not add a prefix because the model may choose not to search."
                 }
             },
             "tools_config": {

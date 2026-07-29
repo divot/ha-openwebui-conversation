@@ -38,6 +38,7 @@ from .const import (
     CONF_MODEL,
     CONF_LANGUAGE_CODE,
     CONF_SEARCH_ENABLED,
+    CONF_SEARCH_MODE,
     CONF_SEARCH_SENTENCES,
     CONF_SEARCH_RESULT_PREFIX,
     CONF_STRIP_MARKDOWN,
@@ -53,6 +54,7 @@ from .const import (
     DEFAULT_MODEL,
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_SEARCH_ENABLED,
+    DEFAULT_SEARCH_MODE,
     DEFAULT_SEARCH_SENTENCES,
     DEFAULT_SEARCH_RESULT_PREFIX,
     DEFAULT_STRIP_MARKDOWN,
@@ -62,9 +64,13 @@ from .const import (
     DEFAULT_STREAMING_ENABLED,
     DEFAULT_SERVER_SIDE_TOOLS_ENABLED,
     DEFAULT_TOOL_IDS,
+    SEARCH_MODE_DISABLED,
+    SEARCH_MODE_NATIVE,
+    SEARCH_MODE_TRIGGER,
 )
 from .exceptions import ApiAuthError, ApiClientError, ApiCommError, ApiTimeoutError
 from .request import normalize_tool_ids
+from .search import search_mode_from_options
 
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
@@ -86,6 +92,7 @@ DEFAULT_OPTIONS = types.MappingProxyType(
         CONF_TIMEOUT: DEFAULT_TIMEOUT,
         CONF_MODEL: DEFAULT_MODEL,
         CONF_SEARCH_ENABLED: DEFAULT_SEARCH_ENABLED,
+        CONF_SEARCH_MODE: DEFAULT_SEARCH_MODE,
         CONF_SEARCH_SENTENCES: DEFAULT_SEARCH_SENTENCES,
         CONF_SEARCH_RESULT_PREFIX: DEFAULT_SEARCH_RESULT_PREFIX,
         CONF_STRIP_MARKDOWN: DEFAULT_STRIP_MARKDOWN,
@@ -239,6 +246,9 @@ class OpenWebUIOptionsFlow(config_entries.OptionsFlow):
     ) -> ConfigFlowResult:
         """Manage Search Settings."""
         if user_input is not None:
+            # The explicit mode supersedes the legacy boolean. Remove it from
+            # newly saved options so diagnostics and future edits are unambiguous.
+            self.options.pop(CONF_SEARCH_ENABLED, None)
             self.options.update(user_input)
             return self.async_create_entry(title="", data=self.options)
 
@@ -408,14 +418,30 @@ def openwebui_schema_search_config(options: Mapping[str, Any]) -> dict:
         options = DEFAULT_OPTIONS
     return {
         vol.Required(
-            CONF_SEARCH_ENABLED,
+            CONF_SEARCH_MODE,
             description={
-                "suggested_value": options.get(
-                    CONF_SEARCH_ENABLED, DEFAULT_SEARCH_ENABLED
-                )
+                "suggested_value": search_mode_from_options(options)
             },
-            default=DEFAULT_SEARCH_ENABLED,
-        ): BooleanSelector(BooleanSelectorConfig()),
+            default=search_mode_from_options(options),
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(
+                        value=SEARCH_MODE_DISABLED,
+                        label="Disabled",
+                    ),
+                    SelectOptionDict(
+                        value=SEARCH_MODE_TRIGGER,
+                        label="Sentence triggers",
+                    ),
+                    SelectOptionDict(
+                        value=SEARCH_MODE_NATIVE,
+                        label="Native function calling",
+                    ),
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
         vol.Required(
             CONF_SEARCH_SENTENCES,
             description={

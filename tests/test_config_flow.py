@@ -11,12 +11,16 @@ from custom_components.openwebui_conversation.const import (
     CONF_BASE_URL,
     CONF_MODEL,
     CONF_PERSISTENT_CHAT_ENABLED,
+    CONF_SEARCH_ENABLED,
+    CONF_SEARCH_MODE,
     CONF_SERVER_SIDE_TOOLS_ENABLED,
     CONF_SERVICE_NAME,
     CONF_TIMEOUT,
     CONF_TOOL_IDS,
     CONF_VERIFY_SSL,
     DOMAIN,
+    SEARCH_MODE_NATIVE,
+    SEARCH_MODE_TRIGGER,
 )
 from custom_components.openwebui_conversation.exceptions import (
     ApiAuthError,
@@ -349,6 +353,63 @@ async def test_general_options_include_persistent_chats(
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_PERSISTENT_CHAT_ENABLED] is True
+
+
+async def test_search_options_migrate_legacy_boolean_to_mode(
+    hass, enable_custom_integrations, setup_homeassistant_component
+) -> None:
+    """The search form maps legacy entries to sentence-trigger mode."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_SERVICE_NAME: "Test",
+            CONF_BASE_URL: "https://openwebui.example",
+            CONF_API_KEY: "secret-key",
+        },
+        options={CONF_SEARCH_ENABLED: True},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "search_config"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["data_schema"]({})[CONF_SEARCH_MODE] == SEARCH_MODE_TRIGGER
+
+
+async def test_search_options_save_native_mode_and_remove_legacy_boolean(
+    hass, enable_custom_integrations, setup_homeassistant_component
+) -> None:
+    """Saving native mode leaves one authoritative search setting."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_SERVICE_NAME: "Test",
+            CONF_BASE_URL: "https://openwebui.example",
+            CONF_API_KEY: "secret-key",
+        },
+        options={CONF_SEARCH_ENABLED: True},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "search_config"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_SEARCH_MODE: SEARCH_MODE_NATIVE,
+            "search_sentences": "search for {query}",
+            "search_result_prefix": "Searched:",
+        },
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_SEARCH_MODE] == SEARCH_MODE_NATIVE
+    assert CONF_SEARCH_ENABLED not in result["data"]
 
 
 async def test_tools_options_require_an_explicit_id(
